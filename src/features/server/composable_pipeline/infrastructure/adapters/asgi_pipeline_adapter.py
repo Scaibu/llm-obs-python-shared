@@ -11,6 +11,9 @@ from src.features.server.composable_pipeline.contracts.pipeline_types import Ing
 from src.features.server.composable_pipeline.service.composable_pipeline_service import (
     ComposablePipelineService,
 )
+from src.features.server.pipeline_route_resolution.contracts.pipeline_route_resolution_types import (
+    RouteResolutionInputDTO,
+)
 
 
 class AsgiPipelineAdapter:
@@ -35,6 +38,29 @@ class AsgiPipelineAdapter:
             for k, v in scope.get("headers", [])
         }
         client_tuple = scope.get("client") or ("127.0.0.1", 0)
+        path = scope.get("path", "/")
+        method = scope.get("method", "GET")
+
+        route_res = self._pipeline_service.stage_route.execute(RouteResolutionInputDTO(path=path, method=method))
+        if route_res.matched and route_res.route is not None and route_res.route.max_body_bytes > 0:
+            content_length_str = headers.get("content-length")
+            if content_length_str and content_length_str.isdigit():
+                content_length = int(content_length_str)
+                if content_length > route_res.route.max_body_bytes:
+                    early_req = IngressRequest(
+                        method=method,
+                        path=path,
+                        headers=headers,
+                        remote_addr=client_tuple[0],
+                        body=b"",
+                    )
+                    res = await self._pipeline_service.execute(early_req)
+                    await self._send_response(res, send)
+                    return
+
+        if headers.get("expect", "").lower().strip() == "100-continue":
+            await send({"type": "http.response.start", "status": 100, "headers": []})
+
         body_parts: List[bytes] = []
         more_body = True
         while more_body:
@@ -42,14 +68,22 @@ class AsgiPipelineAdapter:
             body_parts.append(message.get("body", b""))
             more_body = message.get("more_body", False)
         raw_body = b"".join(body_parts)
+
         req = IngressRequest(
-            method=scope.get("method", "GET"),
-            path=scope.get("path", "/"),
+            method=method,
+            path=path,
             headers=headers,
             remote_addr=client_tuple[0],
             body=raw_body,
         )
         res = await self._pipeline_service.execute(req)
+        await self._send_response(res, send)
+
+    async def _send_response(
+        self,
+        res: Any,
+        send: Callable[[Dict[str, Any]], Any],
+    ) -> None:
         resp_headers: List[Tuple[bytes, bytes]] = [
             (k.encode("latin1"), v.encode("latin1")) for k, v in res.headers.items()
         ]

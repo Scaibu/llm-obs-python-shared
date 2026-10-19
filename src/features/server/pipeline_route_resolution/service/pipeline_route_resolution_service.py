@@ -13,6 +13,10 @@ class PipelineRouteResolutionService:
     def __init__(self, catalog: RouteCatalogPort):
         self._catalog = catalog
 
+    @property
+    def catalog(self) -> RouteCatalogPort:
+        return self._catalog
+
     def execute(self, input_dto: RouteResolutionInputDTO) -> RouteResolutionOutputDTO:
         path_matches = []
         for route in self._catalog.list_routes():

@@ -250,3 +250,70 @@ async def test_e2e_asgi_full_cycle_streaming_and_headers(e2e_pipeline: Composabl
     assert b"content-type" in headers_dict
     assert b"x-request-id" in headers_dict
     assert events[1]["type"] == "http.response.body"
+
+
+@pytest.mark.asyncio
+async def test_e2e_asgi_expect_100_continue_and_streaming(e2e_pipeline: ComposablePipelineService) -> None:
+    adapter = AsgiPipelineAdapter(e2e_pipeline)
+    events: list[dict] = []
+
+    async def mock_receive() -> dict:
+        return {"body": b'{"cart_id":"continue_cart"}', "more_body": False}
+
+    async def mock_send(event: dict) -> None:
+        events.append(event)
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/api/v1/checkout",
+        "headers": [
+            (b"authorization", b"Bearer test-token-tenant1"),
+            (b"content-type", b"application/json"),
+            (b"idempotency-key", b"asgi-continue-key-100"),
+            (b"expect", b"100-continue"),
+        ],
+        "client": ("10.20.0.50", 45678),
+    }
+
+    await adapter(scope, mock_receive, mock_send)
+    assert len(events) == 3
+    assert events[0]["type"] == "http.response.start"
+    assert events[0]["status"] == 100
+    assert events[1]["type"] == "http.response.start"
+    assert events[1]["status"] == 200
+    assert events[2]["type"] == "http.response.body"
+
+
+@pytest.mark.asyncio
+async def test_e2e_asgi_early_payload_size_rejection(e2e_pipeline: ComposablePipelineService) -> None:
+    adapter = AsgiPipelineAdapter(e2e_pipeline)
+    events: list[dict] = []
+    receive_called = False
+
+    async def mock_receive() -> dict:
+        nonlocal receive_called
+        receive_called = True
+        return {"body": b"huge-payload", "more_body": False}
+
+    async def mock_send(event: dict) -> None:
+        events.append(event)
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/api/v1/checkout",
+        "headers": [
+            (b"authorization", b"Bearer test-token-tenant1"),
+            (b"content-type", b"application/json"),
+            (b"content-length", b"1048576"),
+            (b"idempotency-key", b"asgi-oversized-key-1"),
+        ],
+        "client": ("10.20.0.50", 45678),
+    }
+
+    await adapter(scope, mock_receive, mock_send)
+    assert not receive_called
+    assert len(events) == 2
+    assert events[0]["type"] == "http.response.start"
+    assert events[0]["status"] == 413
