@@ -126,3 +126,44 @@ async def test_scenario_method_not_allowed_allow_header(scenario_pipeline: Compo
     assert "Allow" in res.headers
     assert "GET" in res.headers["Allow"]
     assert "POST" in res.headers["Allow"]
+
+@pytest.mark.asyncio
+async def test_scenario_unhandled_exception_boundary(scenario_pipeline: ComposablePipelineService) -> None:
+    async def faulty_dispatch(handler_name: str, body: bytes | None) -> dict:
+        raise RuntimeError("Database connection severed mid-write")
+
+    scenario_pipeline.stage_ingress._dispatcher.dispatch = faulty_dispatch  # type: ignore[assignment]
+    req = IngressRequest(
+        method="POST",
+        path="/api/v1/work",
+        headers={"Authorization": "Bearer test-token-tenant1"},
+    )
+    res = await scenario_pipeline.execute(req)
+    assert res.status_code == 500
+    assert res.problem_details is not None
+    assert res.problem_details.status == 500
+    assert res.problem_details.type.endswith("internal-error")
+    assert res.problem_details.title == "Internal error"
+    assert "Database connection severed" not in (res.problem_details.detail or "")
+    assert res.context is not None
+    assert res.context.is_failed is True
+    assert res.context.rejection_reason == "internal_error"
+
+@pytest.mark.asyncio
+async def test_scenario_unsupported_media_type_boundary(scenario_pipeline: ComposablePipelineService) -> None:
+    req = IngressRequest(
+        method="POST",
+        path="/api/v1/work",
+        headers={
+            "Authorization": "Bearer test-token-tenant1",
+            "Content-Type": "application/xml",
+        },
+    )
+    res = await scenario_pipeline.execute(req)
+    assert res.status_code == 415
+    assert res.problem_details is not None
+    assert res.problem_details.status == 415
+    assert res.problem_details.type.endswith("unsupported-media-type")
+    assert res.problem_details.title == "Unsupported media type"
+    assert res.context is not None
+    assert res.context.rejection_reason == "unsupported_media_type"
