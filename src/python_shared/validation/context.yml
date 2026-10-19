@@ -1,0 +1,11 @@
+feature_name: validation
+bounded_context: shared_kernel
+description: Universal contract and workflow schema validation engine providing resilient parsing, canonical key normalization, and schema conformance across microservices.
+ports:
+  - repository.validation_repository_port
+invariants:
+  - fail direction must be explicit and fail-closed by default for contract evaluation
+  - canonical keys must satisfy idempotence f(f(x)) == f(x)
+  - contract paths must resolve deterministically across local repository and container runtimes
+  - validation errors must be typed and never swallow underlying syntax or structural anomalies
+  - evaluation must be pure and free of side-effects

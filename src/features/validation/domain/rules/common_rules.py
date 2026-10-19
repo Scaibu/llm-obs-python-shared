@@ -40,6 +40,18 @@ class KeyNormalizationRules:
 
 class SchemaValidationRules:
     @staticmethod
+    def extract_pattern(content: str, pattern: str) -> str:
+        m = re.search(pattern, content, re.MULTILINE)
+        if not m:
+            raise ValueError(f"Missing expected pattern in contract: {pattern}")
+        return m.group(1).strip() if m.groups() else m.group(0).strip()
+
+    @staticmethod
+    def extract_int(content: str, key: str) -> int:
+        pattern = rf"^{key}:\s*(\d+)\s*$"
+        return int(SchemaValidationRules.extract_pattern(content, pattern))
+
+    @staticmethod
     def extract_regex_patterns(
         content: str, patterns: Sequence[str]
     ) -> tuple[Mapping[str, str], Sequence[ValidationErrorDetail]]:

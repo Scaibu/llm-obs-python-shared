@@ -43,6 +43,14 @@ class ValidationRules:
         return TomlValidationRules.validate_toml_syntax(content)
 
     @staticmethod
+    def extract_pattern(content: str, pattern: str) -> str:
+        return SchemaValidationRules.extract_pattern(content, pattern)
+
+    @staticmethod
+    def extract_int(content: str, key: str) -> int:
+        return SchemaValidationRules.extract_int(content, key)
+
+    @staticmethod
     def extract_regex_patterns(
         content: str, patterns: Sequence[str]
     ) -> tuple[Mapping[str, str], Sequence[ValidationErrorDetail]]:
