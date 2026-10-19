@@ -334,3 +334,36 @@ async def test_distributed_redis_adapters_execution() -> None:
     res = await pipeline.execute(req)
     assert res.status_code == 200
 
+
+@pytest.mark.asyncio
+async def test_distributed_redis_adapters_with_active_redis_mock() -> None:
+    from unittest.mock import AsyncMock, MagicMock
+    from src.features.server.composable_pipeline.infrastructure.adapters.distributed_redis_idempotency_store_adapter import (
+        DistributedRedisIdempotencyStoreAdapter,
+    )
+    from src.features.server.composable_pipeline.infrastructure.adapters.distributed_redis_tenant_quota_adapter import (
+        DistributedRedisTenantQuotaAdapter,
+    )
+
+    mock_redis = MagicMock()
+    mock_redis.set = AsyncMock(return_value=True)
+    mock_redis.delete = AsyncMock(return_value=1)
+    mock_redis.get = AsyncMock(return_value=b"200::{\"result\":\"ok\"}")
+    mock_redis.eval = MagicMock(return_value=1)
+
+    idemp_adapter = DistributedRedisIdempotencyStoreAdapter(redis_client=mock_redis)
+    await idemp_adapter.record_response("test-idemp-key", 200, b"{\"result\":\"ok\"}", ttl_seconds=3600)
+    mock_redis.set.assert_called_once_with(
+        "idemp:resp:test-idemp-key",
+        b"200::{\"result\":\"ok\"}",
+        ex=3600,
+    )
+
+    cached = await idemp_adapter.get_response("test-idemp-key")
+    assert cached == (200, b"{\"result\":\"ok\"}")
+
+    quota_adapter = DistributedRedisTenantQuotaAdapter(redis_client=mock_redis)
+    allowed = quota_adapter.consume_tenant_quota("tenant-abc", tokens=100, refill_rate=10.0, cost=1.0)
+    assert allowed is True
+    assert mock_redis.eval.called
+

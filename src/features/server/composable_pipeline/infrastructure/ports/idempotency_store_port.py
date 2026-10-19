@@ -16,7 +16,7 @@ class IdempotencyStorePort(ABC):
         pass
 
     @abstractmethod
-    async def record_response(self, key: str, status_code: int, response_body: bytes) -> None:
+    async def record_response(self, key: str, status_code: int, response_body: bytes, ttl_seconds: int = 86400) -> None:
         """
         Records the completed response for an idempotency key.
         """

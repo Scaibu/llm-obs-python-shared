@@ -24,10 +24,14 @@ class DistributedRedisIdempotencyStoreAdapter(IdempotencyStorePort):
         self._fallback_store[key] = ("in_flight", None)
         return True
 
-    async def record_response(self, key: str, status_code: int, response_body: bytes) -> None:
+    async def record_response(self, key: str, status_code: int, response_body: bytes, ttl_seconds: int = 86400) -> None:
         if self._redis is not None:
             try:
-                await self._redis.set(f"idemp:resp:{key}", f"{status_code}".encode() + b"::" + response_body)
+                await self._redis.set(
+                    f"idemp:resp:{key}",
+                    f"{status_code}".encode() + b"::" + response_body,
+                    ex=ttl_seconds,
+                )
                 await self._redis.delete(f"idemp:{key}")
                 return
             except Exception:

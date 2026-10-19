@@ -27,9 +27,9 @@ class InMemoryIdempotencyStoreAdapter(IdempotencyStorePort):
         self._locks[key] = now + ttl_seconds
         return True
 
-    async def record_response(self, key: str, status_code: int, response_body: bytes) -> None:
+    async def record_response(self, key: str, status_code: int, response_body: bytes, ttl_seconds: int = 86400) -> None:
         now = time.monotonic()
-        self._responses[key] = (status_code, response_body, now + 86400)
+        self._responses[key] = (status_code, response_body, now + ttl_seconds)
         self._locks.pop(key, None)
 
     async def get_response(self, key: str) -> Optional[Tuple[int, bytes]]:
