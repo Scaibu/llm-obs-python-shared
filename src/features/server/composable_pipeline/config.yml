@@ -153,8 +153,6 @@ authentication:
 
 authorization:
   mode: route_scopes
-  default_required_scopes:
-    - read
 
 tenant_quota:
   key: claim.tenant_id
