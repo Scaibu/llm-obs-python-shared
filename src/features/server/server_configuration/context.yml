@@ -1,0 +1,12 @@
+feature_name: server_configuration
+bounded_context: server_architecture
+description: Strongly-typed, validated server configuration and immutable policy snapshot adhering strictly to 01-config-and-validation standards.
+ports:
+  - config_loader.config_port
+invariants:
+  - pre-start validation with zero open sockets
+  - duration fields with explicit units, never bare integers
+  - cross-field timeout hierarchy invariants
+  - lifecycle shutdown arithmetic consistency
+  - network exposure separation
+  - immutable frozen snapshot post-validation

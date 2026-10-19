@@ -38,10 +38,10 @@ from python_shared.validation.service.validation_service import ValidationServic
 
 try:
     from api.rest.v1.routers.validation_router import validation_router
-except ImportError:
+except Exception:
     try:
         from src.api.rest.v1.routers.validation_router import validation_router  # type: ignore[no-redef]
-    except ImportError:
+    except Exception:
         validation_router = None  # type: ignore[assignment]
 
 __all__ = [

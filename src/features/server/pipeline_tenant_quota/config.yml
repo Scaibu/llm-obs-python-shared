@@ -1,0 +1,6 @@
+feature: pipeline_tenant_quota
+stage: 9
+max_tokens: 500
+refill_rate_per_sec: 50.0
+retry_after_seconds: 3
+key_source: principal_tenant_id

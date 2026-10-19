@@ -1,0 +1,8 @@
+feature_name: pipeline_handler_ingress
+bounded_context: ingress_pipeline
+description: Stage 12 Handler Ingress step sending 100 Continue if requested, streaming body, and invoking domain service.
+ports:
+  - domain_dispatcher.ingress_port
+invariants:
+  - send 100 Continue if Expect header present
+  - invoke domain service with sanitized and validated request payload

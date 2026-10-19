@@ -1,0 +1,7 @@
+feature_name: pipeline_global_admission
+bounded_context: ingress_pipeline
+description: Stage 3 Global Admission step rejecting requests with HTTP 503 + Retry-After if in-flight >= capacity.
+ports:
+  - capacity_gauge.admission_port
+invariants:
+  - fast drop with 503 and Retry-After if global saturation reached

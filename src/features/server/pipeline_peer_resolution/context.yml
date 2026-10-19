@@ -1,0 +1,8 @@
+feature_name: pipeline_peer_resolution
+bounded_context: ingress_pipeline
+description: Stage 2 Peer Resolution step resolving authentic client IP via right-to-left proxy traversal.
+ports:
+  - proxy_parser.peer_port
+invariants:
+  - traversal must be strictly right-to-left discarding trusted proxy IPs
+  - fallback to socket direct remote address if no proxy headers

@@ -1,0 +1,5 @@
+feature: pipeline_identity
+stage: 1
+trusted_hops_enabled: false
+uuid_version: v7_or_v4
+require_traceparent: false

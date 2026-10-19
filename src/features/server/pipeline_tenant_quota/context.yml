@@ -1,0 +1,7 @@
+feature_name: pipeline_tenant_quota
+bounded_context: ingress_pipeline
+description: Stage 9 Per-Identity Quota step rate-limiting keyed by authenticated principal/tenant.
+ports:
+  - tenant_rate_limiter.quota_port
+invariants:
+  - fail with 429 + Retry-After if authenticated tenant quota depleted

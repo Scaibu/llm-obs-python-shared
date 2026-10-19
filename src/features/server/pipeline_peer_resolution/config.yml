@@ -1,0 +1,9 @@
+feature: pipeline_peer_resolution
+stage: 2
+traversal: right_to_left
+trusted_proxies:
+- 127.0.0.1/32
+- 10.0.0.0/8
+- 172.16.0.0/12
+- 192.168.0.0/16
+forwarded_header: x-forwarded-for

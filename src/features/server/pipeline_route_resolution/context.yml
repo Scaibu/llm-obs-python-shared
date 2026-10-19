@@ -1,0 +1,8 @@
+feature_name: pipeline_route_resolution
+bounded_context: ingress_pipeline
+description: Stage 4 Route Resolution step matching endpoint patterns and methods without reading request body.
+ports:
+  - route_catalog.resolution_port
+invariants:
+  - fail with 404 No Route if path not found
+  - fail with 405 Method Not Allowed + Allow header if method unsupported

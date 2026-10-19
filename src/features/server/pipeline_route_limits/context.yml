@@ -1,0 +1,9 @@
+feature_name: pipeline_route_limits
+bounded_context: ingress_pipeline
+description: Stage 5 Route Limits step checking declared headers (Content-Length, Content-Type, Header sizes) before reading body.
+ports:
+  - route_limit_config.limits_port
+invariants:
+  - fail with 413 Payload Too Large if Content-Length exceeds declared maximum
+  - fail with 415 Unsupported Media Type if Content-Type not in allowlist
+  - fail with 431 Request Header Fields Too Large if headers exceed limit

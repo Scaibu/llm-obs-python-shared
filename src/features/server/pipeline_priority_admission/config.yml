@@ -1,0 +1,9 @@
+feature: pipeline_priority_admission
+stage: 11
+shed_order:
+- batch
+- background
+- interactive
+batch_threshold: 0.8
+background_threshold: 0.95
+retry_after_seconds: 5

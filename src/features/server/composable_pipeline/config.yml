@@ -1,0 +1,5 @@
+feature: composable_pipeline
+execution_mode: strict_12_stage_linear
+problem_details_type_base: https://httpstatuses.io
+emit_access_log: true
+collect_metrics: true

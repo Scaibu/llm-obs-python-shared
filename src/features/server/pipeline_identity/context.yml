@@ -1,0 +1,9 @@
+feature_name: pipeline_identity
+bounded_context: ingress_pipeline
+description: Stage 1 Request Identity step generating UUIDv7 x-request-id and validating W3C traceparent headers.
+ports:
+  - id_generator.identity_port
+invariants:
+  - every incoming request must be assigned a unique request id
+  - traceparent accepted only from trusted hops, fallback to auto-generated
+  - evaluation must be pure and free of mid-function inline comments

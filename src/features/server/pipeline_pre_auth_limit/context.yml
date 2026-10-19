@@ -1,0 +1,8 @@
+feature_name: pipeline_pre_auth_limit
+bounded_context: ingress_pipeline
+description: Stage 6 Pre-Auth Rate Limiting step keyed by resolved peer IP, shielding auth from credential stuffing.
+ports:
+  - ip_rate_limiter.pre_auth_port
+invariants:
+  - must execute strictly BEFORE authentication
+  - fail with 429 + Retry-After if peer IP bucket depleted

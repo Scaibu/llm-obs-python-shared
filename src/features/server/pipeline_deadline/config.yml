@@ -1,0 +1,5 @@
+feature: pipeline_deadline
+stage: 10
+route_min_timeout_ms: 50.0
+route_max_timeout_ms: 10000.0
+safety_margin_ms: 50.0

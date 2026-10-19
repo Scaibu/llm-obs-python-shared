@@ -1,0 +1,5 @@
+feature: pipeline_authorization
+stage: 8
+default_required_scopes:
+- read
+scope_check_mode: superset

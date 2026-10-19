@@ -1,0 +1,7 @@
+feature_name: pipeline_authorization
+bounded_context: ingress_pipeline
+description: Stage 8 Coarse Authorization step verifying principal scopes supersede route scopes.
+ports:
+  - scope_resolver.authz_port
+invariants:
+  - fail with 403 Forbidden if principal scopes do not satisfy required route scopes

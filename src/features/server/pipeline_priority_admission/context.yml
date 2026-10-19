@@ -1,0 +1,8 @@
+feature_name: pipeline_priority_admission
+bounded_context: ingress_pipeline
+description: Stage 11 Priority Admission step with per-class concurrency shedding (shed batch -> background -> interactive).
+ports:
+  - priority_gauge.concurrency_port
+invariants:
+  - shed background and batch classes first under load
+  - fail with 503 + Retry-After if class capacity exceeded

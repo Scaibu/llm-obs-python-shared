@@ -1,0 +1,5 @@
+feature: pipeline_global_admission
+stage: 3
+max_concurrency: 1000
+retry_after_seconds: 5
+rejection_metric_reason: admission

@@ -1,0 +1,8 @@
+feature_name: pipeline_deadline
+bounded_context: ingress_pipeline
+description: Stage 10 Deadline Computation step calculating min(route.max, inherited - margin) and failing fast if budget < route.min.
+ports:
+  - time_provider.clock_port
+invariants:
+  - clamp budget = min(route.max_timeout, client_timeout - margin)
+  - fail fast with 504 DEADLINE_EXCEEDED if budget < route.min_timeout

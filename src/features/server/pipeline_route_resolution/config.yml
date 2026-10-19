@@ -1,0 +1,10 @@
+feature: pipeline_route_resolution
+stage: 4
+case_sensitive: true
+trailing_slash_sensitive: false
+routes:
+- path_template: /api/v1/resource
+  allowed_methods:
+  - GET
+  - POST
+  handler_name: resource_handler

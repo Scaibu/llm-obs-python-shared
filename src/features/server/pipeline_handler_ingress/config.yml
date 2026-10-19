@@ -1,0 +1,5 @@
+feature: pipeline_handler_ingress
+stage: 12
+support_continue_100: true
+stream_body: true
+body_rate_timeout_ms: 5000.0

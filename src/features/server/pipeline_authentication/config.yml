@@ -1,0 +1,6 @@
+feature: pipeline_authentication
+stage: 7
+require_auth: true
+auth_scheme: Bearer
+cache_tokens: true
+token_cache_ttl_seconds: 300

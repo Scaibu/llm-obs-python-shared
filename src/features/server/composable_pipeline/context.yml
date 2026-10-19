@@ -1,0 +1,7 @@
+feature_name: composable_pipeline
+bounded_context: ingress_pipeline
+description: Main Composable Pipeline orchestrator connecting all 12 pipeline stages in strict cheapest-to-most-expensive order.
+invariants:
+  - strict 12-stage sequential order
+  - all failures wrapped in RFC 9457 Problem Details envelope
+  - zero mid-function inline comments
