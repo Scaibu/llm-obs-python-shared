@@ -32,7 +32,11 @@ from src.features.server.pipeline_identity import PipelineIdentityService, Stand
 from src.features.server.pipeline_peer_resolution import PipelinePeerResolutionService, StandardPeerConfigAdapter, PeerResolutionInputDTO
 from src.features.server.pipeline_global_admission import PipelineGlobalAdmissionService, InMemoryAdmissionTrackerAdapter, AdmissionInputDTO
 from src.features.server.pipeline_route_resolution import PipelineRouteResolutionService, InMemoryRouteCatalogAdapter, RouteResolutionInputDTO, RouteDefinition
-from src.features.server.pipeline_route_limits import PipelineRouteLimitsService, RouteLimitsInputDTO
+from src.features.server.pipeline_route_limits import (
+    PipelineRouteLimitsService,
+    RouteLimitsConfig,
+    RouteLimitsInputDTO,
+)
 from src.features.server.pipeline_pre_auth_limit import PipelinePreAuthLimitService, InMemoryPreAuthRateLimitAdapter, PreAuthLimitInputDTO
 from src.features.server.pipeline_authentication import PipelineAuthenticationService, StandardTokenVerifierAdapter, AuthInputDTO
 from src.features.server.pipeline_authorization import PipelineAuthorizationService, AuthzInputDTO
@@ -163,8 +167,12 @@ class ComposablePipelineService:
                 ctx.current_stage_index = 5
                 ctx.current_stage_name = "pipeline_route_limits"
                 ctx.stage_execution_trail.append("stage_route_limits")
+                route_limits_cfg = RouteLimitsConfig(
+                    max_body_bytes=route_out.route.max_body_bytes,
+                    allowed_media_types=route_out.route.allowed_media_types,
+                )
                 with trace_pipeline_stage("stage_route_limits", {"http.route": ctx.matched_route}):
-                    limits_out = self.stage_limits.execute(RouteLimitsInputDTO(headers=req.headers))
+                    limits_out = self.stage_limits.execute(RouteLimitsInputDTO(headers=req.headers, limits=route_limits_cfg))
                     if not limits_out.passed:
                         ctx.status_code = limits_out.status_code
                         ctx.is_failed = True
@@ -217,10 +225,11 @@ class ComposablePipelineService:
                 ctx.current_stage_index = 8
                 ctx.current_stage_name = "pipeline_authorization"
                 ctx.stage_execution_trail.append("stage_authorization")
+                required_route_scopes = route_out.route.required_scopes if route_out.route.required_scopes else {"read"}
                 with trace_pipeline_stage("stage_authorization", {"auth.principal_id": ctx.principal_id or ""}):
                     authz_out = self.stage_authz.execute(AuthzInputDTO(
                         principal_scopes=ctx.authenticated_scopes,
-                        required_scopes={"read"},
+                        required_scopes=required_route_scopes,
                     ))
                     if not authz_out.authorized:
                         ctx.status_code = 403

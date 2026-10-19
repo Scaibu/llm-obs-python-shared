@@ -56,3 +56,27 @@ async def test_declared_route_limit_enforced(config_driven_pipeline: ComposableP
     assert res.problem_details is not None
     assert res.problem_details.status == 413
     assert res.problem_details.title == "Payload Too Large"
+
+@pytest.mark.asyncio
+async def test_per_route_scope_enforcement() -> None:
+    from src.features.server.pipeline_route_resolution import RouteDefinition
+    custom_routes = [
+        RouteDefinition(
+            path_template="/api/v1/admin",
+            allowed_methods={"POST"},
+            handler_name="admin_handler",
+            required_scopes={"admin.write"},
+        )
+    ]
+    pipeline = ComposablePipelineService(routes=custom_routes)
+    req = IngressRequest(
+        method="POST",
+        path="/api/v1/admin",
+        headers={"Authorization": "Bearer test-token-tenant1"},
+    )
+    res = await pipeline.execute(req)
+    assert res.status_code == 403
+    assert res.problem_details is not None
+    assert res.problem_details.status == 403
+    assert res.context is not None
+    assert res.context.rejection_reason == "authz"

@@ -20,10 +20,26 @@ class InMemoryRouteCatalogAdapter(RouteCatalogPort):
                     data = yaml.safe_load(f) or {}
                 raw_routes = data.get("routes", [])
                 for r in raw_routes:
+                    scopes = set()
+                    auth_data = r.get("auth", {})
+                    if isinstance(auth_data, dict):
+                        scopes.update(auth_data.get("scopes", []))
+                    if not scopes:
+                        scopes = set(r.get("required_scopes", []))
+                    req_body = r.get("request_body", {})
+                    max_bytes = req_body.get("max_bytes") if isinstance(req_body, dict) else None
+                    if max_bytes is None:
+                        max_bytes = r.get("max_body_bytes", 10 * 1024 * 1024)
+                    media_types = req_body.get("content_types") if isinstance(req_body, dict) else None
+                    if media_types is None:
+                        media_types = r.get("allowed_media_types", ["application/json"])
                     loaded_routes.append(RouteDefinition(
                         path_template=r.get("path_template", "/"),
-                        allowed_methods=set(r.get("allowed_methods", ["GET"])),
-                        handler_name=r.get("handler_name", "default_handler")
+                        allowed_methods=set(r.get("allowed_methods", r.get("methods", ["GET"]))),
+                        handler_name=r.get("handler_name", r.get("handler", "default_handler")),
+                        required_scopes=scopes,
+                        max_body_bytes=int(max_bytes),
+                        allowed_media_types=list(media_types),
                     ))
             self._routes = loaded_routes
 
