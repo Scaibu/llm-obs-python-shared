@@ -75,3 +75,58 @@ class ProblemTypeSlugs:
 class PipelineMediaTypes:
     JSON: Final[str] = "application/json"
     PROBLEM_JSON: Final[str] = "application/problem+json"
+
+
+class PipelineStageNames:
+    INIT: Final[str] = "init"
+    IDENTITY: Final[str] = "pipeline_identity"
+    PEER_RESOLUTION: Final[str] = "pipeline_peer_resolution"
+    GLOBAL_ADMISSION: Final[str] = "pipeline_global_admission"
+    ROUTE_RESOLUTION: Final[str] = "pipeline_route_resolution"
+    ROUTE_LIMITS: Final[str] = "pipeline_route_limits"
+    PRE_AUTH_LIMIT: Final[str] = "pipeline_pre_auth_limit"
+    AUTHENTICATION: Final[str] = "pipeline_authentication"
+    AUTHORIZATION: Final[str] = "pipeline_authorization"
+    TENANT_QUOTA: Final[str] = "pipeline_tenant_quota"
+    DEADLINE: Final[str] = "pipeline_deadline"
+    PRIORITY_ADMISSION: Final[str] = "pipeline_priority_admission"
+    HANDLER_INGRESS: Final[str] = "pipeline_handler_ingress"
+
+
+class PipelineStageTrails:
+    STAGE_REQUEST_IDENTITY: Final[str] = "stage_request_identity"
+    STAGE_PEER_RESOLUTION: Final[str] = "stage_peer_resolution"
+    STAGE_GLOBAL_ADMISSION: Final[str] = "stage_global_admission"
+    STAGE_ROUTE_RESOLUTION: Final[str] = "stage_route_resolution"
+    STAGE_ROUTE_LIMITS: Final[str] = "stage_route_limits"
+    STAGE_PRE_AUTH_LIMIT: Final[str] = "stage_pre_auth_limit"
+    STAGE_AUTHENTICATION: Final[str] = "stage_authentication"
+    STAGE_AUTHORIZATION: Final[str] = "stage_authorization"
+    STAGE_TENANT_QUOTA: Final[str] = "stage_tenant_quota"
+    STAGE_DEADLINE: Final[str] = "stage_deadline"
+    STAGE_PRIORITY_ADMISSION: Final[str] = "stage_priority_admission"
+    STAGE_HANDLER_INGRESS: Final[str] = "stage_handler_ingress"
+
+
+class PipelineTenantConstants:
+    DEFAULT_TENANT_ID: Final[str] = "default"
+    ANONYMOUS_PRINCIPAL: Final[str] = "anonymous"
+
+
+class PipelineProblemDetails:
+    GLOBAL_CAPACITY_EXCEEDED: Final[str] = "Global capacity exceeded"
+    PATH_NONCANONICAL_DETAIL: Final[str] = "Path is not canonical. Encoded slashes and dot-segments are rejected."
+    ROUTE_NOT_FOUND_DETAIL: Final[str] = "Route matching failed"
+    METHOD_NOT_ALLOWED_DETAIL: Final[str] = "Method not allowed for this route"
+    INTERNAL_ROUTING_ERROR: Final[str] = "Internal routing error"
+    ROUTE_DISABLED_DETAIL: Final[str] = "Route temporarily disabled by kill switch"
+    IDEMPOTENCY_KEY_MISSING_DETAIL: Final[str] = "Idempotency-Key header is required for this route"
+    IDEMPOTENCY_CONFLICT_DETAIL: Final[str] = "A request with this Idempotency-Key is currently in progress"
+    ROUTE_LIMIT_VIOLATED: Final[str] = "Route limit violated"
+    PEER_RATE_LIMIT_DETAIL: Final[str] = "Too many requests from peer IP"
+    AUTH_REQUIRED_DETAIL: Final[str] = "Authentication required"
+    INSUFFICIENT_SCOPES_DETAIL: Final[str] = "Insufficient scopes for route"
+    TENANT_QUOTA_EXHAUSTED_DETAIL: Final[str] = "Tenant quota exhausted"
+    DEADLINE_UNVIABLE_DETAIL: Final[str] = "Deadline expired or insufficient timeout budget"
+    PRIORITY_SHEDDING_DETAIL: Final[str] = "Shedding low priority class"
+    INTERNAL_SERVER_ERROR: Final[str] = "Internal Server Error"
