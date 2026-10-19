@@ -54,3 +54,30 @@ async def test_pipeline_runner():
     runner = HttpPipelineRunner()
     res_ctx = await runner.run(ctx)
     assert res_ctx.step_index >= 1
+
+def test_retry_policy_with_jitter():
+    calls = []
+    def fail_twice():
+        calls.append(1)
+        if len(calls) < 3:
+            raise ValueError("transient failure")
+        return "success"
+
+    policy = RetryPolicy(max_retries=3, backoff_factor=0.01, retryable_exceptions=(ValueError,), jitter=True)
+    res = policy.execute(fail_twice)
+    assert res == "success"
+    assert len(calls) == 3
+
+@pytest.mark.asyncio
+async def test_retry_policy_async_with_jitter():
+    calls = []
+    async def async_fail_once():
+        calls.append(1)
+        if len(calls) < 2:
+            raise RuntimeError("transient async failure")
+        return "async_ok"
+
+    policy = RetryPolicy(max_retries=2, backoff_factor=0.01, retryable_exceptions=(RuntimeError,), jitter=True)
+    res = await policy.execute_async(async_fail_once)
+    assert res == "async_ok"
+    assert len(calls) == 2

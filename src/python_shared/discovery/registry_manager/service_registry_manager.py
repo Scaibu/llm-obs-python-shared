@@ -170,8 +170,7 @@ class ServiceRegistryManager:
 
         def _loop():
             while not self._heartbeat_stop_event.is_set():
-                time.sleep(self.options.heartbeat_interval_seconds)
-                if self._heartbeat_stop_event.is_set():
+                if self._heartbeat_stop_event.wait(timeout=self.options.heartbeat_interval_seconds):
                     break
                 self.send_heartbeat_sync()
 

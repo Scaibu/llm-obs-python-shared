@@ -18,6 +18,23 @@ from python_shared.discovery import (
     register_fastapi_service,
 )
 from python_shared.feature_flags import evaluate_flag
+from src.features.validation import (
+    YamlValidationService,
+    JsonValidationService,
+    ValidationService,
+    ValidationRules,
+    ValidationStateMachine,
+    ValidationReportModel,
+    ValidationStatus,
+    ValidationSeverity,
+    ValidationTargetType,
+    ContractValidationRequestDTO,
+    CanonicalKeyDTO,
+    ValidationErrorDetail,
+    ValidationRepositoryPort,
+    InMemoryValidationRepositoryAdapter,
+    validation_router,
+)
 
 __all__ = [
     "BaseResponse",
@@ -41,4 +58,19 @@ __all__ = [
     "service_registry_manager",
     "register_fastapi_service",
     "evaluate_flag",
+    "YamlValidationService",
+    "JsonValidationService",
+    "ValidationService",
+    "ValidationRules",
+    "ValidationStateMachine",
+    "ValidationReportModel",
+    "ValidationStatus",
+    "ValidationSeverity",
+    "ValidationTargetType",
+    "ContractValidationRequestDTO",
+    "CanonicalKeyDTO",
+    "ValidationErrorDetail",
+    "ValidationRepositoryPort",
+    "InMemoryValidationRepositoryAdapter",
+    "validation_router",
 ]

@@ -1,4 +1,5 @@
 import time
+import random
 import logging
 from typing import Callable, Any, TypeVar, Tuple, Type
 
@@ -10,11 +11,18 @@ class RetryPolicy:
         self,
         max_retries: int = 3,
         backoff_factor: float = 0.5,
-        retryable_exceptions: Tuple[Type[Exception], ...] = (Exception,)
+        retryable_exceptions: Tuple[Type[Exception], ...] = (Exception,),
+        jitter: bool = True
     ):
         self.max_retries = max_retries
         self.backoff_factor = backoff_factor
         self.retryable_exceptions = retryable_exceptions
+        self.jitter = jitter
+
+    def _calculate_backoff(self, attempt: int) -> float:
+        # Full jitter exponential backoff per rule L43
+        base_backoff = self.backoff_factor * (2 ** (attempt - 1))
+        return random.uniform(0, base_backoff) if self.jitter else base_backoff
 
     def execute(self, func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         attempt = 0
@@ -25,8 +33,8 @@ class RetryPolicy:
                 attempt += 1
                 if attempt > self.max_retries:
                     raise e
-                backoff = self.backoff_factor * (2 ** (attempt - 1))
-                logger.warning(f"Retry attempt {attempt}/{self.max_retries} after {backoff}s due to: {e}")
+                backoff = self._calculate_backoff(attempt)
+                logger.warning(f"Retry attempt {attempt}/{self.max_retries} after {backoff:.3f}s due to: {e}")
                 time.sleep(backoff)
 
     async def execute_async(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
@@ -39,6 +47,6 @@ class RetryPolicy:
                 attempt += 1
                 if attempt > self.max_retries:
                     raise e
-                backoff = self.backoff_factor * (2 ** (attempt - 1))
-                logger.warning(f"Async retry attempt {attempt}/{self.max_retries} after {backoff}s due to: {e}")
+                backoff = self._calculate_backoff(attempt)
+                logger.warning(f"Async retry attempt {attempt}/{self.max_retries} after {backoff:.3f}s due to: {e}")
                 await asyncio.sleep(backoff)
