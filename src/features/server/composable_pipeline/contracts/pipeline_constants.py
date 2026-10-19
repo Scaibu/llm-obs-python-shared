@@ -14,9 +14,9 @@ class PipelineHeaders:
     AUTHORIZATION: Final[str] = "authorization"
     CONTENT_TYPE: Final[str] = "content-type"
     CONTENT_LENGTH: Final[str] = "content-length"
-    ALLOW: Final[str] = "allow"
-    RETRY_AFTER: Final[str] = "retry-after"
-    WWW_AUTHENTICATE: Final[str] = "www-authenticate"
+    ALLOW: Final[str] = "Allow"
+    RETRY_AFTER: Final[str] = "Retry-After"
+    WWW_AUTHENTICATE: Final[str] = "WWW-Authenticate"
 
 
 class PipelineRejectionReasons:

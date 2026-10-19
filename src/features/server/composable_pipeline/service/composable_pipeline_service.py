@@ -31,6 +31,9 @@ from src.features.server.composable_pipeline.contracts.pipeline_constants import
     PipelineRejectionReasons,
 )
 from src.features.server.composable_pipeline.domain.rules.rfc9457_rules import ProblemDetailsRules
+from src.features.server.composable_pipeline.domain.rules.response_factory_rules import (
+    ResponseFactoryRules,
+)
 from src.python_shared.telemetry.tracer import trace_pipeline_stage
 from src.features.server.pipeline_identity import PipelineIdentityService, StandardIdentityAdapter, IdentityInputDTO
 from src.features.server.pipeline_peer_resolution import PipelinePeerResolutionService, StandardPeerConfigAdapter, PeerResolutionInputDTO
@@ -146,40 +149,24 @@ class ComposablePipelineService:
             with trace_pipeline_stage("stage_global_admission", {"admission.capacity": self.max_global_concurrency}):
                 adm_out = self.stage_admission.execute(AdmissionInputDTO(max_concurrency=self.max_global_concurrency))
                 if not adm_out.allowed:
-                    ctx.status_code = 503
-                    ctx.is_failed = True
-                    ctx.rejection_reason = "admission"
-                    return IngressResponse(
+                    return ResponseFactoryRules.create_rejection(
+                        ctx=ctx,
                         status_code=503,
-                        headers={"Retry-After": str(adm_out.retry_after_seconds), "x-request-id": ctx.request_id},
-                        problem_details=ProblemDetailsRules.create_problem(
-                            status=503,
-                            detail="Global capacity exceeded",
-                            instance=ctx.request_id,
-                            reason=ctx.rejection_reason,
-                            base_url=self.problem_base_url,
-                            retry_after_seconds=adm_out.retry_after_seconds,
-                        ),
-                        context=ctx,
+                        reason=PipelineRejectionReasons.ADMISSION,
+                        detail="Global capacity exceeded",
+                        problem_base_url=self.problem_base_url,
+                        retry_after_seconds=adm_out.retry_after_seconds,
                     )
 
             try:
                 raw_path = req.path
                 if "//" in raw_path or "/../" in raw_path or raw_path.endswith("/..") or "/./" in raw_path or "%2f" in raw_path.lower() or "%5c" in raw_path.lower():
-                    ctx.status_code = 400
-                    ctx.is_failed = True
-                    ctx.rejection_reason = "path_noncanonical"
-                    return IngressResponse(
+                    return ResponseFactoryRules.create_rejection(
+                        ctx=ctx,
                         status_code=400,
-                        headers={"x-request-id": ctx.request_id},
-                        problem_details=ProblemDetailsRules.create_problem(
-                            status=400,
-                            detail="Path is not canonical. Encoded slashes and dot-segments are rejected.",
-                            instance=ctx.request_id,
-                            reason="path_noncanonical",
-                            base_url=self.problem_base_url,
-                        ),
-                        context=ctx,
+                        reason=PipelineRejectionReasons.PATH_NONCANONICAL,
+                        detail="Path is not canonical. Encoded slashes and dot-segments are rejected.",
+                        problem_base_url=self.problem_base_url,
                     )
 
                 ctx.current_stage_index = 4
@@ -188,93 +175,54 @@ class ComposablePipelineService:
                 with trace_pipeline_stage("stage_route_resolution", {"http.target_path": req.path}):
                     route_out = self.stage_route.execute(RouteResolutionInputDTO(path=req.path, method=req.method))
                     if not route_out.matched:
-                        ctx.status_code = route_out.status_code
-                        ctx.is_failed = True
-                        ctx.rejection_reason = "route_not_found" if route_out.status_code == 404 else "method_not_allowed"
-                        headers = {"x-request-id": ctx.request_id}
-                        if route_out.status_code == 405:
-                            headers["Allow"] = ", ".join(route_out.allowed_methods)
-                        return IngressResponse(
+                        reason = PipelineRejectionReasons.ROUTE_NOT_FOUND if route_out.status_code == 404 else PipelineRejectionReasons.METHOD_NOT_ALLOWED
+                        extra_headers = {"Allow": ", ".join(route_out.allowed_methods)} if route_out.status_code == 405 else None
+                        detail = "Route matching failed" if route_out.status_code == 404 else "Method not allowed for this route"
+                        return ResponseFactoryRules.create_rejection(
+                            ctx=ctx,
                             status_code=route_out.status_code,
-                            headers=headers,
-                            problem_details=ProblemDetailsRules.create_problem(
-                                status=route_out.status_code,
-                                detail="Route matching failed" if route_out.status_code == 404 else "Method not allowed for this route",
-                                instance=ctx.request_id,
-                                reason=ctx.rejection_reason,
-                                base_url=self.problem_base_url,
-                            ),
-                            context=ctx,
+                            reason=reason,
+                            detail=detail,
+                            problem_base_url=self.problem_base_url,
+                            extra_headers=extra_headers,
                         )
 
                     if route_out.route is None:
-                        ctx.status_code = 500
-                        ctx.is_failed = True
-                        ctx.rejection_reason = "internal_error"
-                        return IngressResponse(
+                        return ResponseFactoryRules.create_rejection(
+                            ctx=ctx,
                             status_code=500,
-                            headers={"x-request-id": ctx.request_id},
-                            problem_details=ProblemDetailsRules.create_problem(
-                                status=500,
-                                detail="Internal routing error",
-                                instance=ctx.request_id,
-                                reason="internal_error",
-                                base_url=self.problem_base_url,
-                            ),
-                            context=ctx,
+                            reason=PipelineRejectionReasons.INTERNAL_ERROR,
+                            detail="Internal routing error",
+                            problem_base_url=self.problem_base_url,
                         )
 
                     if route_out.route.disabled:
-                        ctx.status_code = 503
-                        ctx.is_failed = True
-                        ctx.rejection_reason = "route_disabled"
-                        return IngressResponse(
+                        return ResponseFactoryRules.create_rejection(
+                            ctx=ctx,
                             status_code=503,
-                            headers={"x-request-id": ctx.request_id},
-                            problem_details=ProblemDetailsRules.create_problem(
-                                status=503,
-                                detail="Route temporarily disabled by kill switch",
-                                instance=ctx.request_id,
-                                reason="route_disabled",
-                                base_url=self.problem_base_url,
-                            ),
-                            context=ctx,
+                            reason=PipelineRejectionReasons.ROUTE_DISABLED,
+                            detail="Route temporarily disabled by kill switch",
+                            problem_base_url=self.problem_base_url,
                         )
 
                     if route_out.route.idempotency_key_required and req.method.upper() in {"POST", "PUT", "PATCH"}:
                         idempotency_header = req.headers.get(PipelineHeaders.IDEMPOTENCY_KEY)
                         if not idempotency_header:
-                            ctx.status_code = 400
-                            ctx.is_failed = True
-                            ctx.rejection_reason = PipelineRejectionReasons.IDEMPOTENCY_KEY_MISSING
-                            return IngressResponse(
+                            return ResponseFactoryRules.create_rejection(
+                                ctx=ctx,
                                 status_code=400,
-                                headers={PipelineHeaders.REQUEST_ID: ctx.request_id},
-                                problem_details=ProblemDetailsRules.create_problem(
-                                    status=400,
-                                    detail="Idempotency-Key header is required for this route",
-                                    instance=ctx.request_id,
-                                    reason=PipelineRejectionReasons.IDEMPOTENCY_KEY_MISSING,
-                                    base_url=self.problem_base_url,
-                                ),
-                                context=ctx,
+                                reason=PipelineRejectionReasons.IDEMPOTENCY_KEY_MISSING,
+                                detail="Idempotency-Key header is required for this route",
+                                problem_base_url=self.problem_base_url,
                             )
                         acquired = await self.idempotency_store.try_acquire(idempotency_header)
                         if not acquired:
-                            ctx.status_code = 409
-                            ctx.is_failed = True
-                            ctx.rejection_reason = PipelineRejectionReasons.IDEMPOTENCY_CONFLICT
-                            return IngressResponse(
+                            return ResponseFactoryRules.create_rejection(
+                                ctx=ctx,
                                 status_code=409,
-                                headers={PipelineHeaders.REQUEST_ID: ctx.request_id},
-                                problem_details=ProblemDetailsRules.create_problem(
-                                    status=409,
-                                    detail="A request with this Idempotency-Key is currently in progress",
-                                    instance=ctx.request_id,
-                                    reason=PipelineRejectionReasons.IDEMPOTENCY_CONFLICT,
-                                    base_url=self.problem_base_url,
-                                ),
-                                context=ctx,
+                                reason=PipelineRejectionReasons.IDEMPOTENCY_CONFLICT,
+                                detail="A request with this Idempotency-Key is currently in progress",
+                                problem_base_url=self.problem_base_url,
                             )
 
                     ctx.matched_route = route_out.route.path_template
@@ -289,20 +237,13 @@ class ComposablePipelineService:
                 with trace_pipeline_stage("stage_route_limits", {"http.route": ctx.matched_route}):
                     limits_out = self.stage_limits.execute(RouteLimitsInputDTO(headers=req.headers, limits=route_limits_cfg))
                     if not limits_out.passed:
-                        ctx.status_code = limits_out.status_code
-                        ctx.is_failed = True
-                        ctx.rejection_reason = "body_too_large" if limits_out.status_code == 413 else "unsupported_media_type"
-                        return IngressResponse(
+                        reason = PipelineRejectionReasons.BODY_TOO_LARGE if limits_out.status_code == 413 else PipelineRejectionReasons.UNSUPPORTED_MEDIA_TYPE
+                        return ResponseFactoryRules.create_rejection(
+                            ctx=ctx,
                             status_code=limits_out.status_code,
-                            headers={"x-request-id": ctx.request_id},
-                            problem_details=ProblemDetailsRules.create_problem(
-                                status=limits_out.status_code,
-                                detail=limits_out.rejection_reason or "Route limit violated",
-                                instance=ctx.request_id,
-                                reason=ctx.rejection_reason,
-                                base_url=self.problem_base_url,
-                            ),
-                            context=ctx,
+                            reason=reason,
+                            detail=limits_out.rejection_reason or "Route limit violated",
+                            problem_base_url=self.problem_base_url,
                         )
 
                 ctx.current_stage_index = 6
@@ -311,21 +252,13 @@ class ComposablePipelineService:
                 with trace_pipeline_stage("stage_pre_auth_limit", {"client.ip": ctx.resolved_peer_ip}):
                     pre_auth_out = self.stage_pre_auth.execute(PreAuthLimitInputDTO(client_ip=ctx.resolved_peer_ip))
                     if not pre_auth_out.allowed:
-                        ctx.status_code = 429
-                        ctx.is_failed = True
-                        ctx.rejection_reason = "rate_limit"
-                        return IngressResponse(
+                        return ResponseFactoryRules.create_rejection(
+                            ctx=ctx,
                             status_code=429,
-                            headers={"Retry-After": str(pre_auth_out.retry_after_seconds), "x-request-id": ctx.request_id},
-                            problem_details=ProblemDetailsRules.create_problem(
-                                status=429,
-                                detail="Too many requests from peer IP",
-                                instance=ctx.request_id,
-                                reason="rate_limit",
-                                base_url=self.problem_base_url,
-                                retry_after_seconds=pre_auth_out.retry_after_seconds,
-                            ),
-                            context=ctx,
+                            reason=PipelineRejectionReasons.RATE_LIMIT,
+                            detail="Too many requests from peer IP",
+                            problem_base_url=self.problem_base_url,
+                            retry_after_seconds=pre_auth_out.retry_after_seconds,
                         )
 
                 ctx.current_stage_index = 7
@@ -334,20 +267,13 @@ class ComposablePipelineService:
                 with trace_pipeline_stage("stage_authentication", {"auth.scheme": "Bearer"}):
                     auth_out = self.stage_auth.execute(AuthInputDTO(headers=req.headers, require_auth=True))
                     if not auth_out.authenticated:
-                        ctx.status_code = 401
-                        ctx.is_failed = True
-                        ctx.rejection_reason = "auth"
-                        return IngressResponse(
+                        return ResponseFactoryRules.create_rejection(
+                            ctx=ctx,
                             status_code=401,
-                            headers={"WWW-Authenticate": "Bearer", "x-request-id": ctx.request_id},
-                            problem_details=ProblemDetailsRules.create_problem(
-                                status=401,
-                                detail=auth_out.rejection_reason or "Authentication required",
-                                instance=ctx.request_id,
-                                reason="auth",
-                                base_url=self.problem_base_url,
-                            ),
-                            context=ctx,
+                            reason=PipelineRejectionReasons.AUTH,
+                            detail=auth_out.rejection_reason or "Authentication required",
+                            problem_base_url=self.problem_base_url,
+                            extra_headers={"WWW-Authenticate": "Bearer"},
                         )
 
                     ctx.principal = auth_out.principal
@@ -366,20 +292,12 @@ class ComposablePipelineService:
                         required_scopes=required_route_scopes,
                     ))
                     if not authz_out.authorized:
-                        ctx.status_code = 403
-                        ctx.is_failed = True
-                        ctx.rejection_reason = "authz"
-                        return IngressResponse(
+                        return ResponseFactoryRules.create_rejection(
+                            ctx=ctx,
                             status_code=403,
-                            headers={"x-request-id": ctx.request_id},
-                            problem_details=ProblemDetailsRules.create_problem(
-                                status=403,
-                                detail="Insufficient scopes for route",
-                                instance=ctx.request_id,
-                                reason="authz",
-                                base_url=self.problem_base_url,
-                            ),
-                            context=ctx,
+                            reason=PipelineRejectionReasons.AUTHZ,
+                            detail="Insufficient scopes for route",
+                            problem_base_url=self.problem_base_url,
                         )
 
                 ctx.current_stage_index = 9
@@ -392,21 +310,13 @@ class ComposablePipelineService:
                         refill_rate=self.policy.limits.tenant_quota_refill_per_sec,
                     ))
                     if not quota_out.allowed:
-                        ctx.status_code = 429
-                        ctx.is_failed = True
-                        ctx.rejection_reason = "quota"
-                        return IngressResponse(
+                        return ResponseFactoryRules.create_rejection(
+                            ctx=ctx,
                             status_code=429,
-                            headers={"Retry-After": str(quota_out.retry_after_seconds), "x-request-id": ctx.request_id},
-                            problem_details=ProblemDetailsRules.create_problem(
-                                status=429,
-                                detail="Tenant quota exhausted",
-                                instance=ctx.request_id,
-                                reason="quota",
-                                base_url=self.problem_base_url,
-                                retry_after_seconds=quota_out.retry_after_seconds,
-                            ),
-                            context=ctx,
+                            reason=PipelineRejectionReasons.QUOTA,
+                            detail="Tenant quota exhausted",
+                            problem_base_url=self.problem_base_url,
+                            retry_after_seconds=quota_out.retry_after_seconds,
                         )
 
                 ctx.current_stage_index = 10
@@ -416,20 +326,12 @@ class ComposablePipelineService:
                     deadline_out = self.stage_deadline.execute(DeadlineInputDTO(client_timeout_ms=req.client_timeout_ms))
                     ctx.allocated_deadline_ms = deadline_out.allocated_budget_ms
                     if not deadline_out.valid:
-                        ctx.status_code = 504
-                        ctx.is_failed = True
-                        ctx.rejection_reason = "deadline_unviable"
-                        return IngressResponse(
+                        return ResponseFactoryRules.create_rejection(
+                            ctx=ctx,
                             status_code=504,
-                            headers={"x-request-id": ctx.request_id},
-                            problem_details=ProblemDetailsRules.create_problem(
-                                status=504,
-                                detail="Deadline expired or insufficient timeout budget",
-                                instance=ctx.request_id,
-                                reason="deadline_unviable",
-                                base_url=self.problem_base_url,
-                            ),
-                            context=ctx,
+                            reason=PipelineRejectionReasons.DEADLINE_UNVIABLE,
+                            detail="Deadline expired or insufficient timeout budget",
+                            problem_base_url=self.problem_base_url,
                         )
 
                 ctx.current_stage_index = 11
@@ -443,21 +345,13 @@ class ComposablePipelineService:
                         system_load_ratio=load_ratio,
                     ))
                     if not priority_out.admitted:
-                        ctx.status_code = 503
-                        ctx.is_failed = True
-                        ctx.rejection_reason = "priority_shedding"
-                        return IngressResponse(
+                        return ResponseFactoryRules.create_rejection(
+                            ctx=ctx,
                             status_code=503,
-                            headers={"Retry-After": str(priority_out.retry_after_seconds), "x-request-id": ctx.request_id},
-                            problem_details=ProblemDetailsRules.create_problem(
-                                status=503,
-                                detail="Shedding low priority class",
-                                instance=ctx.request_id,
-                                reason="priority_shedding",
-                                base_url=self.problem_base_url,
-                                retry_after_seconds=priority_out.retry_after_seconds,
-                            ),
-                            context=ctx,
+                            reason=PipelineRejectionReasons.PRIORITY_SHEDDING,
+                            detail="Shedding low priority class",
+                            problem_base_url=self.problem_base_url,
+                            retry_after_seconds=priority_out.retry_after_seconds,
                         )
 
                 ctx.current_stage_index = 12
@@ -470,31 +364,21 @@ class ComposablePipelineService:
                         target_handler=route_out.route.handler_name,
                     ))
 
-                ctx.status_code = ingress_out.status_code
-                return IngressResponse(
+                return ResponseFactoryRules.create_success(
+                    ctx=ctx,
                     status_code=ingress_out.status_code,
-                    headers={"x-request-id": ctx.request_id, "traceparent": ctx.trace_id},
-                    body=ingress_out.response_body,
-                    context=ctx,
+                    response_body=ingress_out.response_body,
                 )
             finally:
                 self.stage_admission.release()
         except Exception as e:
-            ctx.status_code = 500
-            ctx.is_failed = True
-            ctx.rejection_reason = "internal_error"
             logger.error("Unhandled pipeline exception: %s", str(e), exc_info=True)
-            return IngressResponse(
+            return ResponseFactoryRules.create_rejection(
+                ctx=ctx,
                 status_code=500,
-                headers={"x-request-id": ctx.request_id},
-                problem_details=ProblemDetailsRules.create_problem(
-                    status=500,
-                    detail="Internal Server Error",
-                    instance=ctx.request_id,
-                    reason="internal_error",
-                    base_url=self.problem_base_url,
-                ),
-                context=ctx,
+                reason=PipelineRejectionReasons.INTERNAL_ERROR,
+                detail="Internal Server Error",
+                problem_base_url=self.problem_base_url,
             )
         finally:
             duration = time.monotonic() - start_time
