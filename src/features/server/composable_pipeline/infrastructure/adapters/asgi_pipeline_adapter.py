@@ -57,7 +57,7 @@ class AsgiPipelineAdapter:
             body_bytes = res.problem_details.model_dump_json().encode("utf-8")
             resp_headers.append((b"content-type", b"application/problem+json"))
         elif isinstance(res.body, (dict, list)):
-            body_bytes = json.dumps(res.body).encode("utf-8")
+            body_bytes = json.dumps(res.body, default=lambda o: o.decode("utf-8", errors="replace") if isinstance(o, bytes) else str(o)).encode("utf-8")
             resp_headers.append((b"content-type", b"application/json"))
         elif isinstance(res.body, str):
             body_bytes = res.body.encode("utf-8")
