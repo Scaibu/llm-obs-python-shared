@@ -81,3 +81,27 @@ async def test_per_route_scope_enforcement() -> None:
     assert res.problem_details.status == 403
     assert res.context is not None
     assert res.context.rejection_reason == "authz"
+
+def test_unit_parsing_rules() -> None:
+    from src.features.server.composable_pipeline import UnitParsingRules
+    assert UnitParsingRules.parse_duration_to_seconds("10s") == 10.0
+    assert UnitParsingRules.parse_duration_to_seconds("50ms") == 0.05
+    assert UnitParsingRules.parse_duration_to_milliseconds("10s") == 10000.0
+    assert UnitParsingRules.parse_bytes("64KiB") == 65536
+    assert UnitParsingRules.parse_bytes("1MiB") == 1048576
+    assert UnitParsingRules.parse_bytes("10MiB") == 10485760
+
+def test_pipeline_config_validation_rules() -> None:
+    from src.features.server.composable_pipeline import PipelineConfigValidationRules
+    invalid_cfg = {
+        "routes": [
+            {
+                "name": "insecure_route",
+                "path_template": "/api/v1/insecure",
+                "auth": {"required": True, "scopes": []},
+            }
+        ]
+    }
+    violations = PipelineConfigValidationRules.validate_configuration(invalid_cfg)
+    assert len(violations) > 0
+    assert "requires auth but defines no scopes" in violations[0]

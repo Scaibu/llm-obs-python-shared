@@ -64,6 +64,15 @@ class ComposablePipelineService:
             with open(cfg_file, "r") as f:
                 unified_cfg = yaml.safe_load(f) or {}
 
+        from src.features.server.composable_pipeline.domain.rules.pipeline_config_validation_rules import (
+            PipelineConfigValidationRules,
+        )
+
+        validation_errors = PipelineConfigValidationRules.validate_configuration(unified_cfg)
+        if validation_errors:
+            for err in validation_errors:
+                logger.warning("Pipeline configuration validation warning: %s", err)
+
         self.policy = policy if policy is not None else ServerPolicySnapshot()
         self.stage_identity = PipelineIdentityService(port=StandardIdentityAdapter())
 
