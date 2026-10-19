@@ -26,6 +26,7 @@ class PipelineHeaders:
     ACCESS_CONTROL_REQUEST_METHOD: Final[str] = "access-control-request-method"
     ACCESS_CONTROL_REQUEST_HEADERS: Final[str] = "access-control-request-headers"
     X_CSRF_TOKEN: Final[str] = "x-csrf-token"
+    IDEMPOTENT_REPLAY: Final[str] = "x-idempotent-replay"
 
 
 class PipelineRejectionReasons:

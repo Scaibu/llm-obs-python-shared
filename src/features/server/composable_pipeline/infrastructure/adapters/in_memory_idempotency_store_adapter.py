@@ -16,6 +16,10 @@ class InMemoryIdempotencyStoreAdapter(IdempotencyStorePort):
 
     async def try_acquire(self, key: str, ttl_seconds: int = 86400) -> bool:
         now = time.monotonic()
+        if key in self._responses:
+            _, _, expiry = self._responses[key]
+            if now < expiry:
+                return False
         if key in self._locks:
             expiry = self._locks[key]
             if now < expiry:
@@ -26,6 +30,7 @@ class InMemoryIdempotencyStoreAdapter(IdempotencyStorePort):
     async def record_response(self, key: str, status_code: int, response_body: bytes) -> None:
         now = time.monotonic()
         self._responses[key] = (status_code, response_body, now + 86400)
+        self._locks.pop(key, None)
 
     async def get_response(self, key: str) -> Optional[Tuple[int, bytes]]:
         now = time.monotonic()
@@ -34,3 +39,4 @@ class InMemoryIdempotencyStoreAdapter(IdempotencyStorePort):
             if now < expiry:
                 return (status, body)
         return None
+

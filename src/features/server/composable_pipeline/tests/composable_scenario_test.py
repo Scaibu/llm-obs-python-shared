@@ -245,10 +245,26 @@ async def test_scenario_idempotency_conflict_enforced() -> None:
         )
     ]
     pipeline = ComposablePipelineService(routes=custom_routes)
+    await pipeline.idempotency_store.try_acquire("tx-in-flight-12345")
+
+    conflict_req = IngressRequest(
+        method="POST",
+        path="/api/v1/payments",
+        headers={"Authorization": "Bearer test-token-tenant1", "idempotency-key": "tx-in-flight-12345"},
+    )
+    res_conflict = await pipeline.execute(conflict_req)
+    assert res_conflict.status_code == 409
+    assert res_conflict.problem_details is not None
+    assert res_conflict.problem_details.status == 409
+    assert res_conflict.problem_details.type.endswith("idempotency-conflict")
+    assert res_conflict.problem_details.title == "Request with this key in progress"
+    assert res_conflict.context is not None
+    assert res_conflict.context.rejection_reason == "idempotency_conflict"
+
     req1 = IngressRequest(
         method="POST",
         path="/api/v1/payments",
-        headers={"Authorization": "Bearer test-token-tenant1", "idempotency-key": "tx-12345"},
+        headers={"Authorization": "Bearer test-token-tenant1", "idempotency-key": "tx-success-12345"},
     )
     res1 = await pipeline.execute(req1)
     assert res1.status_code == 200
@@ -256,16 +272,11 @@ async def test_scenario_idempotency_conflict_enforced() -> None:
     req2 = IngressRequest(
         method="POST",
         path="/api/v1/payments",
-        headers={"Authorization": "Bearer test-token-tenant1", "idempotency-key": "tx-12345"},
+        headers={"Authorization": "Bearer test-token-tenant1", "idempotency-key": "tx-success-12345"},
     )
     res2 = await pipeline.execute(req2)
-    assert res2.status_code == 409
-    assert res2.problem_details is not None
-    assert res2.problem_details.status == 409
-    assert res2.problem_details.type.endswith("idempotency-conflict")
-    assert res2.problem_details.title == "Request with this key in progress"
-    assert res2.context is not None
-    assert res2.context.rejection_reason == "idempotency_conflict"
+    assert res2.status_code == 200
+    assert res2.headers.get("x-idempotent-replay") == "true"
 
 
 @pytest.mark.asyncio

@@ -16,6 +16,7 @@ Blueprint:
      - Stage 11: Priority Admission (load shedding batch -> background -> interactive; 503)
      - Stage 12: Handler Ingress (100-continue, body streamed, domain dispatch)
 """
+import json
 import time
 import logging
 from typing import Any, Dict, List, Optional
@@ -279,6 +280,20 @@ class ComposablePipelineService:
                                 detail=PipelineProblemDetails.IDEMPOTENCY_KEY_MISSING_DETAIL,
                                 problem_base_url=self.problem_base_url,
                             )
+                        cached_record = await self.idempotency_store.get_response(idempotency_header)
+                        if cached_record is not None:
+                            cached_status, cached_bytes = cached_record
+                            cached_body: Any
+                            try:
+                                cached_body = json.loads(cached_bytes.decode("utf-8"))
+                            except Exception:
+                                cached_body = cached_bytes
+                            return ResponseFactoryRules.create_success(
+                                ctx=ctx,
+                                status_code=cached_status,
+                                response_body=cached_body,
+                                extra_headers={PipelineHeaders.IDEMPOTENT_REPLAY: "true"},
+                            )
                         acquired = await self.idempotency_store.try_acquire(idempotency_header)
                         if not acquired:
                             return ResponseFactoryRules.create_rejection(
@@ -426,6 +441,28 @@ class ComposablePipelineService:
                         body=req.body,
                         target_handler=route_out.route.handler_name,
                     ))
+
+                if route_out.route.idempotency_key_required and RequestMutationRules.is_mutating_method(req.method):
+                    idempotency_header = req.headers.get(PipelineHeaders.IDEMPOTENCY_KEY)
+                    if idempotency_header:
+                        resp_bytes: bytes
+                        if isinstance(ingress_out.response_body, bytes):
+                            resp_bytes = ingress_out.response_body
+                        elif isinstance(ingress_out.response_body, str):
+                            resp_bytes = ingress_out.response_body.encode("utf-8")
+                        else:
+                            try:
+                                resp_bytes = json.dumps(
+                                    ingress_out.response_body,
+                                    default=lambda o: o.decode("utf-8", errors="replace") if isinstance(o, bytes) else str(o),
+                                ).encode("utf-8")
+                            except Exception:
+                                resp_bytes = str(ingress_out.response_body).encode("utf-8")
+                        await self.idempotency_store.record_response(
+                            key=idempotency_header,
+                            status_code=ingress_out.status_code,
+                            response_body=resp_bytes,
+                        )
 
                 return ResponseFactoryRules.create_success(
                     ctx=ctx,

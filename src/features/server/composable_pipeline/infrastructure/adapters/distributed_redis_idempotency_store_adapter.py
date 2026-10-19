@@ -10,6 +10,9 @@ class DistributedRedisIdempotencyStoreAdapter(IdempotencyStorePort):
         self._fallback_store: Dict[str, Tuple[str, Optional[Tuple[int, bytes]]]] = {}
 
     async def try_acquire(self, key: str, ttl_seconds: int = 86400) -> bool:
+        cached = await self.get_response(key)
+        if cached is not None:
+            return False
         if self._redis is not None:
             try:
                 res = await self._redis.set(f"idemp:{key}", "in_flight", nx=True, ex=ttl_seconds)
@@ -25,6 +28,7 @@ class DistributedRedisIdempotencyStoreAdapter(IdempotencyStorePort):
         if self._redis is not None:
             try:
                 await self._redis.set(f"idemp:resp:{key}", f"{status_code}".encode() + b"::" + response_body)
+                await self._redis.delete(f"idemp:{key}")
                 return
             except Exception:
                 pass

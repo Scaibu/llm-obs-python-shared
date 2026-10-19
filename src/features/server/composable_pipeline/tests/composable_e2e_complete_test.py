@@ -154,19 +154,42 @@ async def test_e2e_csrf_browser_mutating_protection() -> None:
 
 
 @pytest.mark.asyncio
-async def test_e2e_idempotency_concurrent_duplicate_collision(e2e_pipeline: ComposablePipelineService) -> None:
+async def test_e2e_idempotency_replay_completed_response(e2e_pipeline: ComposablePipelineService) -> None:
     first_req = IngressRequest(
         method="POST",
         path="/api/v1/checkout",
         headers={
             PipelineHeaders.AUTHORIZATION: "Bearer test-token-tenant1",
             PipelineHeaders.CONTENT_TYPE: "application/json",
-            PipelineHeaders.IDEMPOTENCY_KEY: "collision-key-999",
+            PipelineHeaders.IDEMPOTENCY_KEY: "replay-key-001",
         },
-        body=b'{"cart_id": "cart_1"}',
+        body=b'{"cart_id": "cart_replay"}',
     )
     first_res = await e2e_pipeline.execute(first_req)
     assert first_res.status_code == 200
+    assert first_res.body is not None
+
+    replay_req = IngressRequest(
+        method="POST",
+        path="/api/v1/checkout",
+        headers={
+            PipelineHeaders.AUTHORIZATION: "Bearer test-token-tenant1",
+            PipelineHeaders.CONTENT_TYPE: "application/json",
+            PipelineHeaders.IDEMPOTENCY_KEY: "replay-key-001",
+        },
+        body=b'{"cart_id": "cart_replay"}',
+    )
+    replay_res = await e2e_pipeline.execute(replay_req)
+    assert replay_res.status_code == 200
+    assert replay_res.headers.get(PipelineHeaders.IDEMPOTENT_REPLAY) == "true"
+    assert replay_res.body["status"] == first_res.body["status"]
+    assert replay_res.body["handler"] == first_res.body["handler"]
+
+
+@pytest.mark.asyncio
+async def test_e2e_idempotency_concurrent_in_flight_collision(e2e_pipeline: ComposablePipelineService) -> None:
+    key = "concurrent-lock-key-999"
+    await e2e_pipeline.idempotency_store.try_acquire(key)
 
     collision_req = IngressRequest(
         method="POST",
@@ -174,7 +197,7 @@ async def test_e2e_idempotency_concurrent_duplicate_collision(e2e_pipeline: Comp
         headers={
             PipelineHeaders.AUTHORIZATION: "Bearer test-token-tenant1",
             PipelineHeaders.CONTENT_TYPE: "application/json",
-            PipelineHeaders.IDEMPOTENCY_KEY: "collision-key-999",
+            PipelineHeaders.IDEMPOTENCY_KEY: key,
         },
         body=b'{"cart_id": "cart_1"}',
     )
