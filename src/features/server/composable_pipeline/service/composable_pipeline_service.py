@@ -288,11 +288,10 @@ class ComposablePipelineService:
                 ctx.current_stage_index = 8
                 ctx.current_stage_name = "pipeline_authorization"
                 ctx.stage_execution_trail.append("stage_authorization")
-                required_route_scopes = route_out.route.required_scopes if route_out.route.required_scopes else {"read"}
                 with trace_pipeline_stage("stage_authorization", {"auth.principal_id": ctx.principal_id or ""}):
                     authz_out = self.stage_authz.execute(AuthzInputDTO(
                         principal_scopes=ctx.authenticated_scopes,
-                        required_scopes=required_route_scopes,
+                        required_scopes=route_out.route.required_scopes,
                     ))
                     if not authz_out.authorized:
                         return ResponseFactoryRules.create_rejection(

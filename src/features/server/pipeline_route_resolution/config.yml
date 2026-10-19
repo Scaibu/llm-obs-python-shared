@@ -6,5 +6,12 @@ routes:
 - path_template: /api/v1/resource
   allowed_methods:
   - GET
+  handler_name: resource_handler
+  required_scopes:
+  - read
+- path_template: /api/v1/resource
+  allowed_methods:
   - POST
   handler_name: resource_handler
+  required_scopes:
+  - write
