@@ -359,38 +359,9 @@ class ComposablePipelineService:
                 )
 
     async def asgi(self, scope: dict, receive: Any, send: Any) -> None:
-        if scope.get("type") != "http":
-            return
-        headers = {k.decode("latin1").lower(): v.decode("latin1") for k, v in scope.get("headers", [])}
-        client = scope.get("client") or ("127.0.0.1", 0)
-        body_parts = []
-        more_body = True
-        while more_body:
-            message = await receive()
-            body_parts.append(message.get("body", b""))
-            more_body = message.get("more_body", False)
-        raw_body = b"".join(body_parts)
-        req = IngressRequest(
-            method=scope.get("method", "GET"),
-            path=scope.get("path", "/"),
-            headers=headers,
-            remote_addr=client[0],
-            body=raw_body,
+        from src.features.server.composable_pipeline.infrastructure.adapters.asgi_pipeline_adapter import (
+            AsgiPipelineAdapter,
         )
-        res = await self.execute(req)
-        resp_headers = [(k.encode("latin1"), v.encode("latin1")) for k, v in res.headers.items()]
-        import json
-        if res.problem_details is not None:
-            body_bytes = res.problem_details.model_dump_json().encode("utf-8")
-            resp_headers.append((b"content-type", b"application/problem+json"))
-        elif isinstance(res.body, (dict, list)):
-            body_bytes = json.dumps(res.body).encode("utf-8")
-            resp_headers.append((b"content-type", b"application/json"))
-        elif isinstance(res.body, str):
-            body_bytes = res.body.encode("utf-8")
-        elif isinstance(res.body, bytes):
-            body_bytes = res.body
-        else:
-            body_bytes = b""
-        await send({"type": "http.response.start", "status": res.status_code, "headers": resp_headers})
-        await send({"type": "http.response.body", "body": body_bytes})
+
+        adapter = AsgiPipelineAdapter(self)
+        await adapter(scope, receive, send)

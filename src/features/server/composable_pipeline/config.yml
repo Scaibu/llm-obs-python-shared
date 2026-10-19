@@ -1,76 +1,312 @@
-# Single Unified Configuration for the Composable Request Pipeline
-# All Stages, Policies, Limits, Routes, Timeouts, and Quotas Declared in this Single YAML File
-# Zero Numbers in Identifiers / Semantic Names Only
+# Pipeline Configuration for Composable Request Pipeline
+# All Stages, Policies, Route Definitions, Limits, Timeouts, and Quotas Declared Here
 
+schema: https://config.example.internal/schemas/request-pipeline.json
 pipeline:
   name: composable_request_pipeline
-  version: "1.0.0"
-  emit_access_log: true
-  collect_metrics: true
-  problem_details_type_base: https://httpstatuses.io
+  version: "1.1.0"
+  limit_scope: per_replica
+  reloadable: true
+
+outer_wrapper:
+  problem_type_base: https://errors.example.com/problems/
+  rejection_types:
+    admission: overloaded
+    priority_shed: overloaded
+    route_not_found: not-found
+    method_not_allowed: method-not-allowed
+    path_noncanonical: invalid-path
+    body_too_large: payload-too-large
+    unsupported_media_type: unsupported-media-type
+    decompression_limit: payload-too-large
+    rate_limit: rate-limited
+    quota: quota-exceeded
+    authentication: unauthenticated
+    authorization: forbidden
+    deadline_unviable: deadline-unviable
+    idempotency_conflict: idempotency-conflict
+    route_disabled: route-disabled
+  access_log:
+    enabled: true
+    field_allowlist:
+      - request_id
+      - trace_id
+      - route
+      - method
+      - status
+      - reason
+      - duration
+      - peer
+      - principal_id
+      - tenant_id
+      - bytes_in
+      - bytes_out
+    success_sample_ratio: 1.0
+    success_sample_ratio_under_overload: 0.1
+  metrics:
+    enabled: true
+    route_label: template
 
 request_identity:
-  request_id_header: x-request-id
-  traceparent_header: traceparent
-  allow_inbound_traceparent: false
+  request_id:
+    header: x-request-id
+    accept_inbound: trusted_hops_only
+    format: "^[A-Za-z0-9._-]{8,64}$"
+  traceparent:
+    header: traceparent
+    accept_inbound: trusted_hops_only
 
 peer_resolution:
+  source: x_forwarded_for
   trusted_proxies:
     - "127.0.0.1/32"
-    - "10.0.0.0/8"
-    - "172.16.0.0/12"
-    - "192.168.0.0/16"
+    - "::1/128"
+    - "10.20.0.0/24"
+  max_forwarded_hops: 3
+  on_malformed_from_trusted: reject
+
+path_canonicalization:
+  decode_once: true
+  reject_encoded_slash: true
+  reject_encoded_backslash: true
+  reject_dot_segments: true
+  reject_double_encoding: true
+  case_sensitive: true
+  trailing_slash: reject
 
 global_admission:
+  limiter: static
+  max_in_flight: 1000
   max_concurrency: 1000
+  queue:
+    max_size: 200
+    max_wait: 100ms
+    discipline: fifo
+    discipline_under_overload: lifo_codel
   retry_after_seconds: 5
+  retry_after:
+    base: 5s
+    jitter_ratio: 0.2
 
-route_resolution:
-  routes:
-    - path_template: "/api/v1/resource"
-      allowed_methods: ["GET", "POST"]
-      handler_name: "resource_handler"
-
-route_limits:
-  max_body_bytes: 10485760 # 10 MiB
-  allowed_content_types:
-    - application/json
-    - text/plain
-    - application/problem+json
+priority_admission:
+  classes:
+    background:
+      shed_at_ratio: 0.70
+    batch:
+      shed_at_ratio: 0.80
+    interactive:
+      shed_at_ratio: 1.00
+  batch_shed_load_ratio: 0.80
+  background_shed_load_ratio: 0.95
+  retry_after_seconds: 5
+  retry_after:
+    base: 5s
+    jitter_ratio: 0.2
 
 pre_auth_rate_limit:
-  max_tokens: 100
-  refill_rate_per_sec: 10.0
+  key: resolved_peer
+  algorithm: gcra
+  scope: local
+  rate: 100/s
+  max_tokens: 200
+  burst: 200
+  refill_rate_per_sec: 100.0
+  exempt:
+    - mtls_authenticated_peers
   retry_after_seconds: 5
+  retry_after: computed
 
 authentication:
   scheme: Bearer
   require_auth: true
+  token_format: jwt
+  issuers:
+    - https://auth.example.com/
+  audiences:
+    - api.example.com
+  allowed_algorithms:
+    - ES256
+    - RS256
+  required_claims:
+    - sub
+    - exp
+    - iat
+    - tenant_id
   clock_skew_tolerance_ms: 3000
+  clock_skew_tolerance: 3s
+  jwks:
+    url: https://auth.example.com/.well-known/jwks.json
+    refresh_interval: 10m
+    unknown_kid_refresh_min_interval: 30s
+    max_stale_when_unreachable: 24h
+  verification_cache:
+    max_entries: 100000
+    max_ttl: 5m
 
 authorization:
+  mode: route_scopes
   default_required_scopes:
     - read
 
 tenant_quota:
+  key: claim.tenant_id
+  algorithm: gcra
+  scope: global
+  rate: 50/s
   max_tokens: 500
+  burst: 500
   refill_rate_per_sec: 50.0
   retry_after_seconds: 3
+  store:
+    timeout: 20ms
+    on_failure: local_fallback
+    local_fallback_rate: 10/s
+  retry_after: computed
+
+deadline:
+  inbound_header: grpc-timeout
+  accept_inbound: trusted_hops_only
+  safety_margin: 50ms
+  safety_margin_ms: 50.0
+  min_budget_ms: 10.0
+  max_budget_ms: 10000.0
+  enforce_min_viable: true
 
 deadline_budget:
   max_budget_ms: 10000.0
   min_budget_ms: 10.0
   safety_margin_ms: 50.0
 
-priority_admission:
-  shed_order:
-    - batch
-    - background
-    - interactive
-  batch_shed_load_ratio: 0.80
-  background_shed_load_ratio: 0.95
-  retry_after_seconds: 5
+idempotency:
+  header: idempotency-key
+  key_format: "^[A-Za-z0-9-]{16,128}$"
+  ttl: 24h
+  on_concurrent_duplicate: conflict
+  store:
+    timeout: 20ms
+    on_failure: reject
 
 handler_ingress:
   stream_chunk_bytes: 65536
+  stream_chunk: 64KiB
   expect_continue_support: true
+  expect_continue: after_auth
+
+route_defaults:
+  request_body:
+    max_bytes: 10485760 # 10 MiB
+    content_types:
+      - application/json
+    content_encodings:
+      - identity
+    max_decompressed_bytes: 10485760
+    max_compression_ratio: 20
+  timeout:
+    min: 10ms
+    max: 10s
+
+route_limits:
+  max_body_bytes: 10485760
+  allowed_content_types:
+    - application/json
+
+routes:
+  - name: resource_read
+    path_template: /api/v1/resource
+    methods:
+      - GET
+    allowed_methods:
+      - GET
+    handler: resource_handler
+    handler_name: resource_handler
+    upstream: resource_service
+    auth:
+      required: true
+      scopes:
+        - resource.read
+    priority_class: interactive
+    idempotent: true
+    request_body:
+      allowed: false
+      max_bytes: 0
+    timeout:
+      min: 20ms
+      max: 2s
+    disabled: false
+
+  - name: resource_write
+    path_template: /api/v1/resource
+    methods:
+      - POST
+    allowed_methods:
+      - POST
+    handler: resource_handler
+    handler_name: resource_handler
+    upstream: resource_service
+    auth:
+      required: true
+      scopes:
+        - resource.write
+    priority_class: interactive
+    idempotent: false
+    idempotency_key: required
+    request_body:
+      allowed: true
+      max_bytes: 1048576 # 1 MiB
+      content_types:
+        - application/json
+      content_encodings:
+        - identity
+        - gzip
+      max_decompressed_bytes: 4194304 # 4 MiB
+    timeout:
+      min: 50ms
+      max: 5s
+    disabled: false
+
+route_resolution:
+  routes:
+    - path_template: /api/v1/resource
+      allowed_methods:
+        - GET
+        - POST
+      handler_name: resource_handler
+
+upstreams:
+  resource_service:
+    connect_timeout: 200ms
+    max_connections: 100
+    max_pending: 50
+    retry:
+      on:
+        - connect_failure
+        - refused_stream
+        - unavailable
+      only_if: idempotent_or_keyed
+      budget_ratio: 0.1
+      min_retries_per_second: 5
+      backoff:
+        base: 25ms
+        max: 1s
+        jitter: full
+    circuit_breaker:
+      error_rate_threshold: 0.5
+      min_requests: 20
+      open_duration:
+        base: 5s
+        max: 60s
+        jitter_ratio: 0.2
+    outlier_ejection:
+      consecutive_failures: 5
+      max_ejected_ratio: 0.3
+
+validation_rules:
+  - "routes.all(r, has(r.auth.scopes) && size(r.auth.scopes) > 0 || !r.auth.required)"
+  - "routes.all(r, !has(r.request_body.max_bytes) || r.request_body.max_bytes <= route_defaults.request_body.max_bytes)"
+  - "routes.all(r, r.timeout.max <= route_defaults.timeout.max)"
+  - "routes.all(r, r.timeout.min > deadline.safety_margin)"
+  - "routes.all(r, r.priority_class in priority_admission.classes)"
+  - "routes.all(r, r.upstream in upstreams)"
+  - "routes.all(r, r.idempotent || r.idempotency_key == 'required' || r.methods.all(m, m in ['GET','HEAD','OPTIONS']))"
+  - "global_admission.queue.max_wait < routes.map(r, r.timeout.min).min()"
+  - "pre_auth_rate_limit.rate >= tenant_quota.rate"
