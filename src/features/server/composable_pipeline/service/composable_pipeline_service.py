@@ -151,8 +151,7 @@ class ComposablePipelineService:
         response = await self._execute(req, body_reader)
         origin = req.headers.get(PipelineHeaders.ORIGIN)
         if (
-            response.status_code >= 400
-            and self.cors_enabled
+            self.cors_enabled
             and origin
             and CorsAndCsrfRules.is_cors_request(origin)
             and CorsAndCsrfRules.is_origin_allowed(origin, self.allowed_origins)
