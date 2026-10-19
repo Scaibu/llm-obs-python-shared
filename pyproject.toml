@@ -36,5 +36,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["python_shared*"]
 [tool.pyright]
 extraPaths = ["src"]
