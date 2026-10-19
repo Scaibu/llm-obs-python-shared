@@ -34,6 +34,10 @@ from src.features.server.composable_pipeline.domain.rules.rfc9457_rules import P
 from src.features.server.composable_pipeline.domain.rules.response_factory_rules import (
     ResponseFactoryRules,
 )
+from src.features.server.composable_pipeline.domain.rules.path_canonicalization_rules import (
+    PathCanonicalizationRules,
+    RequestMutationRules,
+)
 from src.python_shared.telemetry.tracer import trace_pipeline_stage
 from src.features.server.pipeline_identity import PipelineIdentityService, StandardIdentityAdapter, IdentityInputDTO
 from src.features.server.pipeline_peer_resolution import PipelinePeerResolutionService, StandardPeerConfigAdapter, PeerResolutionInputDTO
@@ -159,8 +163,7 @@ class ComposablePipelineService:
                     )
 
             try:
-                raw_path = req.path
-                if "//" in raw_path or "/../" in raw_path or raw_path.endswith("/..") or "/./" in raw_path or "%2f" in raw_path.lower() or "%5c" in raw_path.lower():
+                if not PathCanonicalizationRules.is_canonical_path(req.path):
                     return ResponseFactoryRules.create_rejection(
                         ctx=ctx,
                         status_code=400,
@@ -205,7 +208,7 @@ class ComposablePipelineService:
                             problem_base_url=self.problem_base_url,
                         )
 
-                    if route_out.route.idempotency_key_required and req.method.upper() in {"POST", "PUT", "PATCH"}:
+                    if route_out.route.idempotency_key_required and RequestMutationRules.is_mutating_method(req.method):
                         idempotency_header = req.headers.get(PipelineHeaders.IDEMPOTENCY_KEY)
                         if not idempotency_header:
                             return ResponseFactoryRules.create_rejection(
