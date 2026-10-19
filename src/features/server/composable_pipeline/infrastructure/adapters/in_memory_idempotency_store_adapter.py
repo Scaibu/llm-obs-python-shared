@@ -32,6 +32,9 @@ class InMemoryIdempotencyStoreAdapter(IdempotencyStorePort):
         self._responses[key] = (status_code, response_body, now + ttl_seconds)
         self._locks.pop(key, None)
 
+    async def release(self, key: str) -> None:
+        self._locks.pop(key, None)
+
     async def get_response(self, key: str) -> Optional[Tuple[int, bytes]]:
         now = time.monotonic()
         if key in self._responses:

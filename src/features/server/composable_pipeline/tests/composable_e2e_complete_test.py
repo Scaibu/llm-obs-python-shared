@@ -278,7 +278,7 @@ async def test_e2e_asgi_expect_100_continue_and_streaming(e2e_pipeline: Composab
 
     await adapter(scope, mock_receive, mock_send)
     assert len(events) == 3
-    assert events[0]["type"] == "http.response.start"
+    assert events[0]["type"] == "http.response.informational"
     assert events[0]["status"] == 100
     assert events[1]["type"] == "http.response.start"
     assert events[1]["status"] == 200

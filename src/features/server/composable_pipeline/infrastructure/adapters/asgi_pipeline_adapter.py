@@ -7,12 +7,12 @@ Blueprint:
 import json
 from typing import Any, Callable, Dict, List, Tuple
 
-from src.features.server.composable_pipeline.contracts.pipeline_types import IngressRequest
+from src.features.server.composable_pipeline.contracts.pipeline_types import (
+    IngressRequest,
+    PayloadTooLargeError,
+)
 from src.features.server.composable_pipeline.service.composable_pipeline_service import (
     ComposablePipelineService,
-)
-from src.features.server.pipeline_route_resolution.contracts.pipeline_route_resolution_types import (
-    RouteResolutionInputDTO,
 )
 
 
@@ -41,42 +41,32 @@ class AsgiPipelineAdapter:
         path = scope.get("path", "/")
         method = scope.get("method", "GET")
 
-        route_res = self._pipeline_service.stage_route.execute(RouteResolutionInputDTO(path=path, method=method))
-        if route_res.matched and route_res.route is not None and route_res.route.max_body_bytes > 0:
-            content_length_str = headers.get("content-length")
-            if content_length_str and content_length_str.isdigit():
-                content_length = int(content_length_str)
-                if content_length > route_res.route.max_body_bytes:
-                    early_req = IngressRequest(
-                        method=method,
-                        path=path,
-                        headers=headers,
-                        remote_addr=client_tuple[0],
-                        body=b"",
-                    )
-                    res = await self._pipeline_service.execute(early_req)
-                    await self._send_response(res, send)
-                    return
+        expects_continue = headers.get("expect", "").lower().strip() == "100-continue"
 
-        if headers.get("expect", "").lower().strip() == "100-continue":
-            await send({"type": "http.response.start", "status": 100, "headers": []})
-
-        body_parts: List[bytes] = []
-        more_body = True
-        while more_body:
-            message = await receive()
-            body_parts.append(message.get("body", b""))
-            more_body = message.get("more_body", False)
-        raw_body = b"".join(body_parts)
+        async def read_body(max_bytes: int) -> bytes:
+            if expects_continue:
+                await send({"type": "http.response.informational", "status": 100, "headers": []})
+            body_parts: List[bytes] = []
+            total = 0
+            more_body = True
+            while more_body:
+                message = await receive()
+                chunk = message.get("body", b"")
+                total += len(chunk)
+                if max_bytes > 0 and total > max_bytes:
+                    raise PayloadTooLargeError()
+                body_parts.append(chunk)
+                more_body = message.get("more_body", False)
+            return b"".join(body_parts)
 
         req = IngressRequest(
             method=method,
             path=path,
             headers=headers,
             remote_addr=client_tuple[0],
-            body=raw_body,
+            body=None,
         )
-        res = await self._pipeline_service.execute(req)
+        res = await self._pipeline_service.execute(req, body_reader=read_body)
         await self._send_response(res, send)
 
     async def _send_response(

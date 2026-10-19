@@ -9,6 +9,10 @@ from src.features.server.pipeline_priority_admission.contracts.pipeline_priority
     RequestPriorityClass,
 )
 
+class PayloadTooLargeError(Exception):
+    """Raised by a streaming body reader when the body exceeds the route limit."""
+
+
 class IngressRequest(BaseModel):
     method: str = "GET"
     path: str = "/"

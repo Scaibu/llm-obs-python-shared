@@ -19,10 +19,11 @@ Blueprint:
 import json
 import time
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 from src.features.server.composable_pipeline.contracts.pipeline_types import (
     IngressRequest,
     IngressResponse,
+    PayloadTooLargeError,
     PipelineRequestContext,
 )
 from src.features.server.composable_pipeline.contracts.rfc9457_types import ProblemDetails
@@ -142,8 +143,12 @@ class ComposablePipelineService:
         self.csrf_enabled: bool = csrf_cfg.get("enabled", False)
         self.csrf_header_name: str = csrf_cfg.get("header_name", PipelineHeaders.X_CSRF_TOKEN)
 
-    async def execute(self, req: IngressRequest) -> IngressResponse:
-        response = await self._execute(req)
+    async def execute(
+        self,
+        req: IngressRequest,
+        body_reader: Optional[Callable[[int], Awaitable[bytes]]] = None,
+    ) -> IngressResponse:
+        response = await self._execute(req, body_reader)
         origin = req.headers.get(PipelineHeaders.ORIGIN)
         if (
             response.status_code >= 400
@@ -155,7 +160,11 @@ class ComposablePipelineService:
             response.headers.update(CorsAndCsrfRules.build_cors_headers(origin, self.cors_allow_credentials))
         return response
 
-    async def _execute(self, req: IngressRequest) -> IngressResponse:
+    async def _execute(
+        self,
+        req: IngressRequest,
+        body_reader: Optional[Callable[[int], Awaitable[bytes]]] = None,
+    ) -> IngressResponse:
         start_time = time.monotonic()
         ctx = PipelineRequestContext(
             request=req,
@@ -163,6 +172,7 @@ class ComposablePipelineService:
             matched_route=req.path,
         )
 
+        held_idempotency_key: Optional[str] = None
         try:
             ctx.current_stage_index = 1
             ctx.current_stage_name = PipelineStageNames.IDENTITY
@@ -316,6 +326,7 @@ class ComposablePipelineService:
                                 detail=PipelineProblemDetails.IDEMPOTENCY_CONFLICT_DETAIL,
                                 problem_base_url=self.problem_base_url,
                             )
+                        held_idempotency_key = idempotency_header
 
                     ctx.matched_route = route_out.route.path_template
 
@@ -455,6 +466,17 @@ class ComposablePipelineService:
                 ctx.current_stage_index = 12
                 ctx.current_stage_name = PipelineStageNames.HANDLER_INGRESS
                 ctx.stage_execution_trail.append(PipelineStageTrails.STAGE_HANDLER_INGRESS)
+                if body_reader is not None:
+                    try:
+                        req.body = await body_reader(route_out.route.max_body_bytes)
+                    except PayloadTooLargeError:
+                        return ResponseFactoryRules.create_rejection(
+                            ctx=ctx,
+                            status_code=413,
+                            reason=PipelineRejectionReasons.BODY_TOO_LARGE,
+                            detail="Payload Too Large",
+                            problem_base_url=self.problem_base_url,
+                        )
                 with trace_pipeline_stage(PipelineStageTrails.STAGE_HANDLER_INGRESS, {"handler.target": route_out.route.handler_name}):
                     ingress_out = await self.stage_ingress.execute(HandlerIngressInputDTO(
                         headers=req.headers,
@@ -483,6 +505,7 @@ class ComposablePipelineService:
                             status_code=ingress_out.status_code,
                             response_body=resp_bytes,
                         )
+                        held_idempotency_key = None
 
                 return ResponseFactoryRules.create_success(
                     ctx=ctx,
@@ -490,6 +513,8 @@ class ComposablePipelineService:
                     response_body=ingress_out.response_body,
                 )
             finally:
+                if held_idempotency_key is not None:
+                    await self.idempotency_store.release(held_idempotency_key)
                 self.stage_admission.release()
         except Exception as e:
             logger.error("Unhandled pipeline exception: %s", str(e), exc_info=True)

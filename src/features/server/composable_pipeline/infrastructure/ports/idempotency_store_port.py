@@ -23,6 +23,13 @@ class IdempotencyStorePort(ABC):
         pass
 
     @abstractmethod
+    async def release(self, key: str) -> None:
+        """
+        Releases an in-flight lock for a key whose request did not complete, so retries can proceed.
+        """
+        pass
+
+    @abstractmethod
     async def get_response(self, key: str) -> Optional[tuple[int, bytes]]:
         """
         Retrieves cached response if key was previously completed.

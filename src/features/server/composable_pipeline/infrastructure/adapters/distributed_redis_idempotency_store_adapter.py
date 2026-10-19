@@ -38,6 +38,16 @@ class DistributedRedisIdempotencyStoreAdapter(IdempotencyStorePort):
                 pass
         self._fallback_store[key] = ("completed", (status_code, response_body))
 
+    async def release(self, key: str) -> None:
+        if self._redis is not None:
+            try:
+                await self._redis.delete(f"idemp:{key}")
+            except Exception:
+                pass
+        entry = self._fallback_store.get(key)
+        if entry and entry[0] == "in_flight":
+            del self._fallback_store[key]
+
     async def get_response(self, key: str) -> Optional[Tuple[int, bytes]]:
         if self._redis is not None:
             try:
