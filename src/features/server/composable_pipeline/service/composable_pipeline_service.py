@@ -146,6 +146,24 @@ class ComposablePipelineService:
                     )
 
             try:
+                raw_path = req.path
+                if "//" in raw_path or "/../" in raw_path or raw_path.endswith("/..") or "/./" in raw_path or "%2f" in raw_path.lower() or "%5c" in raw_path.lower():
+                    ctx.status_code = 400
+                    ctx.is_failed = True
+                    ctx.rejection_reason = "path_noncanonical"
+                    return IngressResponse(
+                        status_code=400,
+                        headers={"x-request-id": ctx.request_id},
+                        problem_details=ProblemDetailsRules.create_problem(
+                            status=400,
+                            detail="Path is not canonical. Encoded slashes and dot-segments are rejected.",
+                            instance=ctx.request_id,
+                            reason="path_noncanonical",
+                            base_url=self.problem_base_url,
+                        ),
+                        context=ctx,
+                    )
+
                 ctx.current_stage_index = 4
                 ctx.current_stage_name = "pipeline_route_resolution"
                 ctx.stage_execution_trail.append("stage_route_resolution")
@@ -187,6 +205,42 @@ class ComposablePipelineService:
                             ),
                             context=ctx,
                         )
+
+                    if route_out.route.disabled:
+                        ctx.status_code = 503
+                        ctx.is_failed = True
+                        ctx.rejection_reason = "route_disabled"
+                        return IngressResponse(
+                            status_code=503,
+                            headers={"x-request-id": ctx.request_id},
+                            problem_details=ProblemDetailsRules.create_problem(
+                                status=503,
+                                detail="Route temporarily disabled by kill switch",
+                                instance=ctx.request_id,
+                                reason="route_disabled",
+                                base_url=self.problem_base_url,
+                            ),
+                            context=ctx,
+                        )
+
+                    if route_out.route.idempotency_key_required and req.method.upper() in {"POST", "PUT", "PATCH"}:
+                        idempotency_header = req.headers.get("idempotency-key")
+                        if not idempotency_header:
+                            ctx.status_code = 400
+                            ctx.is_failed = True
+                            ctx.rejection_reason = "idempotency_key_missing"
+                            return IngressResponse(
+                                status_code=400,
+                                headers={"x-request-id": ctx.request_id},
+                                problem_details=ProblemDetailsRules.create_problem(
+                                    status=400,
+                                    detail="Idempotency-Key header is required for this route",
+                                    instance=ctx.request_id,
+                                    reason="idempotency_key_missing",
+                                    base_url=self.problem_base_url,
+                                ),
+                                context=ctx,
+                            )
 
                     ctx.matched_route = route_out.route.path_template
 

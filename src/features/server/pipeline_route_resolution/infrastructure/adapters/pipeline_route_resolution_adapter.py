@@ -33,6 +33,8 @@ class InMemoryRouteCatalogAdapter(RouteCatalogPort):
                     media_types = req_body.get("content_types") if isinstance(req_body, dict) else None
                     if media_types is None:
                         media_types = r.get("allowed_media_types", ["application/json"])
+                    is_disabled = bool(r.get("disabled", False))
+                    idemp_key_req = r.get("idempotency_key") == "required" or bool(r.get("idempotency_key_required", False))
                     loaded_routes.append(RouteDefinition(
                         path_template=r.get("path_template", "/"),
                         allowed_methods=set(r.get("allowed_methods", r.get("methods", ["GET"]))),
@@ -40,6 +42,8 @@ class InMemoryRouteCatalogAdapter(RouteCatalogPort):
                         required_scopes=scopes,
                         max_body_bytes=int(max_bytes),
                         allowed_media_types=list(media_types),
+                        disabled=is_disabled,
+                        idempotency_key_required=idemp_key_req,
                     ))
             self._routes = loaded_routes
 

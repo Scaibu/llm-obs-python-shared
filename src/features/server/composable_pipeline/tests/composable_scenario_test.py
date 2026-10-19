@@ -167,3 +167,69 @@ async def test_scenario_unsupported_media_type_boundary(scenario_pipeline: Compo
     assert res.problem_details.title == "Unsupported media type"
     assert res.context is not None
     assert res.context.rejection_reason == "unsupported_media_type"
+
+@pytest.mark.asyncio
+async def test_scenario_path_noncanonical_rejected(scenario_pipeline: ComposablePipelineService) -> None:
+    req = IngressRequest(
+        method="GET",
+        path="/api/v1/work/../secret",
+        headers={"Authorization": "Bearer test-token-tenant1"},
+    )
+    res = await scenario_pipeline.execute(req)
+    assert res.status_code == 400
+    assert res.problem_details is not None
+    assert res.problem_details.status == 400
+    assert res.problem_details.type.endswith("invalid-path")
+    assert res.problem_details.title == "Invalid request path"
+    assert res.context is not None
+    assert res.context.rejection_reason == "path_noncanonical"
+
+@pytest.mark.asyncio
+async def test_scenario_route_kill_switch_disabled() -> None:
+    custom_routes = [
+        RouteDefinition(
+            path_template="/api/v1/emergency",
+            allowed_methods={"GET"},
+            handler_name="emergency_handler",
+            disabled=True,
+        )
+    ]
+    pipeline = ComposablePipelineService(routes=custom_routes)
+    req = IngressRequest(
+        method="GET",
+        path="/api/v1/emergency",
+        headers={"Authorization": "Bearer test-token-tenant1"},
+    )
+    res = await pipeline.execute(req)
+    assert res.status_code == 503
+    assert res.problem_details is not None
+    assert res.problem_details.status == 503
+    assert res.problem_details.type.endswith("route-disabled")
+    assert res.problem_details.title == "Operation temporarily disabled"
+    assert res.context is not None
+    assert res.context.rejection_reason == "route_disabled"
+
+@pytest.mark.asyncio
+async def test_scenario_idempotency_key_missing_enforced() -> None:
+    custom_routes = [
+        RouteDefinition(
+            path_template="/api/v1/payments",
+            allowed_methods={"POST"},
+            handler_name="payments_handler",
+            idempotency_key_required=True,
+        )
+    ]
+    pipeline = ComposablePipelineService(routes=custom_routes)
+    req = IngressRequest(
+        method="POST",
+        path="/api/v1/payments",
+        headers={"Authorization": "Bearer test-token-tenant1"},
+    )
+    res = await pipeline.execute(req)
+    assert res.status_code == 400
+    assert res.problem_details is not None
+    assert res.problem_details.status == 400
+    assert res.problem_details.type.endswith("idempotency-key-missing")
+    assert res.problem_details.title == "Idempotency key required"
+    assert res.context is not None
+    assert res.context.rejection_reason == "idempotency_key_missing"
