@@ -44,6 +44,8 @@ class InMemoryRouteCatalogAdapter(RouteCatalogPort):
                         allowed_media_types=list(media_types),
                         disabled=is_disabled,
                         idempotency_key_required=idemp_key_req,
+                        min_timeout_ms=float(r.get("min_timeout_ms", 50.0)),
+                        max_timeout_ms=float(r.get("max_timeout_ms", 10000.0)),
                     ))
             self._routes = loaded_routes
 

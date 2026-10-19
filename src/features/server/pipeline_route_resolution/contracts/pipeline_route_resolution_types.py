@@ -14,6 +14,8 @@ class RouteDefinition(BaseModel):
     allowed_media_types: List[str] = Field(default_factory=lambda: ["application/json"])
     disabled: bool = False
     idempotency_key_required: bool = False
+    min_timeout_ms: float = Field(default=50.0)
+    max_timeout_ms: float = Field(default=10000.0)
 
 class RouteResolutionInputDTO(BaseModel):
     path: str

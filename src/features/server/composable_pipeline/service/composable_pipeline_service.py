@@ -143,6 +143,19 @@ class ComposablePipelineService:
         self.csrf_header_name: str = csrf_cfg.get("header_name", PipelineHeaders.X_CSRF_TOKEN)
 
     async def execute(self, req: IngressRequest) -> IngressResponse:
+        response = await self._execute(req)
+        origin = req.headers.get(PipelineHeaders.ORIGIN)
+        if (
+            response.status_code >= 400
+            and self.cors_enabled
+            and origin
+            and CorsAndCsrfRules.is_cors_request(origin)
+            and CorsAndCsrfRules.is_origin_allowed(origin, self.allowed_origins)
+        ):
+            response.headers.update(CorsAndCsrfRules.build_cors_headers(origin, self.cors_allow_credentials))
+        return response
+
+    async def _execute(self, req: IngressRequest) -> IngressResponse:
         start_time = time.monotonic()
         ctx = PipelineRequestContext(
             request=req,
@@ -316,7 +329,10 @@ class ComposablePipelineService:
                 with trace_pipeline_stage(PipelineStageTrails.STAGE_ROUTE_LIMITS, {"http.route": ctx.matched_route}):
                     limits_out = self.stage_limits.execute(RouteLimitsInputDTO(headers=req.headers, limits=route_limits_cfg))
                     if not limits_out.passed:
-                        reason = PipelineRejectionReasons.BODY_TOO_LARGE if limits_out.status_code == 413 else PipelineRejectionReasons.UNSUPPORTED_MEDIA_TYPE
+                        reason = {
+                            413: PipelineRejectionReasons.BODY_TOO_LARGE,
+                            431: PipelineRejectionReasons.HEADERS_TOO_LARGE,
+                        }.get(limits_out.status_code, PipelineRejectionReasons.UNSUPPORTED_MEDIA_TYPE)
                         return ResponseFactoryRules.create_rejection(
                             ctx=ctx,
                             status_code=limits_out.status_code,
@@ -401,7 +417,11 @@ class ComposablePipelineService:
                 ctx.current_stage_name = PipelineStageNames.DEADLINE
                 ctx.stage_execution_trail.append(PipelineStageTrails.STAGE_DEADLINE)
                 with trace_pipeline_stage(PipelineStageTrails.STAGE_DEADLINE, {"client.timeout_ms": req.client_timeout_ms or 0.0}):
-                    deadline_out = self.stage_deadline.execute(DeadlineInputDTO(client_timeout_ms=req.client_timeout_ms))
+                    deadline_out = self.stage_deadline.execute(DeadlineInputDTO(
+                        client_timeout_ms=req.client_timeout_ms,
+                        route_min_ms=route_out.route.min_timeout_ms,
+                        route_max_ms=route_out.route.max_timeout_ms,
+                    ))
                     ctx.allocated_deadline_ms = deadline_out.allocated_budget_ms
                     if not deadline_out.valid:
                         return ResponseFactoryRules.create_rejection(

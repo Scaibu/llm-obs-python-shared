@@ -40,3 +40,13 @@ class CorsAndCsrfRules:
         if not client_token or not expected_token:
             return False
         return client_token.strip() == expected_token.strip()
+
+    @staticmethod
+    def build_cors_headers(
+        origin: str,
+        allow_credentials: bool,
+    ) -> dict[str, str]:
+        headers = {PipelineHeaders.ACCESS_CONTROL_ALLOW_ORIGIN: origin}
+        if allow_credentials:
+            headers[PipelineHeaders.ACCESS_CONTROL_ALLOW_CREDENTIALS] = "true"
+        return headers

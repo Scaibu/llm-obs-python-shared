@@ -11,6 +11,11 @@ from src.features.server.pipeline_route_limits.domain.rules.pipeline_route_limit
 class PipelineRouteLimitsService:
     def execute(self, input_dto: RouteLimitsInputDTO) -> RouteLimitsOutputDTO:
         headers = {k.lower(): str(v) for k, v in input_dto.headers.items()}
+        if not RouteLimitsRules.validate_header_size(headers, input_dto.limits.max_header_bytes):
+            return RouteLimitsOutputDTO(
+                passed=False, status_code=431, rejection_reason="Request Header Fields Too Large"
+            )
+
         if not RouteLimitsRules.validate_content_length(headers, input_dto.limits.max_body_bytes):
             return RouteLimitsOutputDTO(passed=False, status_code=413, rejection_reason="Payload Too Large")
 
