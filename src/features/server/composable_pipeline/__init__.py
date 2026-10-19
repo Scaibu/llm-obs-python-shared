@@ -8,6 +8,12 @@ from src.features.server.composable_pipeline.contracts.pipeline_types import (
 )
 from src.features.server.composable_pipeline.contracts.rfc9457_types import ProblemDetails
 from src.features.server.composable_pipeline.contracts.telemetry_types import AccessLogEntry, PipelineMetricsRecord
+from src.features.server.composable_pipeline.contracts.pipeline_constants import (
+    PipelineHeaders,
+    PipelineRejectionReasons,
+    ProblemTypeSlugs,
+    PipelineMediaTypes,
+)
 from src.features.server.composable_pipeline.domain.rules.rfc9457_rules import ProblemDetailsRules
 from src.features.server.composable_pipeline.domain.rules.unit_parsing_rules import UnitParsingRules
 from src.features.server.composable_pipeline.domain.rules.pipeline_config_validation_rules import (
@@ -32,6 +38,10 @@ __all__ = [
     "ProblemDetails",
     "AccessLogEntry",
     "PipelineMetricsRecord",
+    "PipelineHeaders",
+    "PipelineRejectionReasons",
+    "ProblemTypeSlugs",
+    "PipelineMediaTypes",
     "ProblemDetailsRules",
     "UnitParsingRules",
     "PipelineConfigValidationRules",

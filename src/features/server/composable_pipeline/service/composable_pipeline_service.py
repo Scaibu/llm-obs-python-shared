@@ -26,6 +26,10 @@ from src.features.server.composable_pipeline.contracts.pipeline_types import (
 )
 from src.features.server.composable_pipeline.contracts.rfc9457_types import ProblemDetails
 from src.features.server.composable_pipeline.contracts.telemetry_types import AccessLogEntry, PipelineMetricsRecord
+from src.features.server.composable_pipeline.contracts.pipeline_constants import (
+    PipelineHeaders,
+    PipelineRejectionReasons,
+)
 from src.features.server.composable_pipeline.domain.rules.rfc9457_rules import ProblemDetailsRules
 from src.python_shared.telemetry.tracer import trace_pipeline_stage
 from src.features.server.pipeline_identity import PipelineIdentityService, StandardIdentityAdapter, IdentityInputDTO
@@ -238,19 +242,19 @@ class ComposablePipelineService:
                         )
 
                     if route_out.route.idempotency_key_required and req.method.upper() in {"POST", "PUT", "PATCH"}:
-                        idempotency_header = req.headers.get("idempotency-key")
+                        idempotency_header = req.headers.get(PipelineHeaders.IDEMPOTENCY_KEY)
                         if not idempotency_header:
                             ctx.status_code = 400
                             ctx.is_failed = True
-                            ctx.rejection_reason = "idempotency_key_missing"
+                            ctx.rejection_reason = PipelineRejectionReasons.IDEMPOTENCY_KEY_MISSING
                             return IngressResponse(
                                 status_code=400,
-                                headers={"x-request-id": ctx.request_id},
+                                headers={PipelineHeaders.REQUEST_ID: ctx.request_id},
                                 problem_details=ProblemDetailsRules.create_problem(
                                     status=400,
                                     detail="Idempotency-Key header is required for this route",
                                     instance=ctx.request_id,
-                                    reason="idempotency_key_missing",
+                                    reason=PipelineRejectionReasons.IDEMPOTENCY_KEY_MISSING,
                                     base_url=self.problem_base_url,
                                 ),
                                 context=ctx,
@@ -259,15 +263,15 @@ class ComposablePipelineService:
                         if not acquired:
                             ctx.status_code = 409
                             ctx.is_failed = True
-                            ctx.rejection_reason = "idempotency_conflict"
+                            ctx.rejection_reason = PipelineRejectionReasons.IDEMPOTENCY_CONFLICT
                             return IngressResponse(
                                 status_code=409,
-                                headers={"x-request-id": ctx.request_id},
+                                headers={PipelineHeaders.REQUEST_ID: ctx.request_id},
                                 problem_details=ProblemDetailsRules.create_problem(
                                     status=409,
                                     detail="A request with this Idempotency-Key is currently in progress",
                                     instance=ctx.request_id,
-                                    reason="idempotency_conflict",
+                                    reason=PipelineRejectionReasons.IDEMPOTENCY_CONFLICT,
                                     base_url=self.problem_base_url,
                                 ),
                                 context=ctx,

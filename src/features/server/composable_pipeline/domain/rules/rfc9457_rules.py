@@ -6,6 +6,10 @@ Blueprint:
 """
 from typing import Any, Dict, Optional
 from src.features.server.composable_pipeline.contracts.rfc9457_types import ProblemDetails
+from src.features.server.composable_pipeline.contracts.pipeline_constants import (
+    PipelineRejectionReasons,
+    ProblemTypeSlugs,
+)
 
 
 class ProblemDetailsRules:
@@ -17,56 +21,56 @@ class ProblemDetailsRules:
     DEFAULT_PROBLEM_BASE: str = "https://errors.example.com/problems/"
 
     REJECTION_TYPE_MAP: Dict[str, str] = {
-        "admission": "overloaded",
-        "priority_shed": "overloaded",
-        "priority_shedding": "overloaded",
-        "route_not_found": "not-found",
-        "method_not_allowed": "method-not-allowed",
-        "path_noncanonical": "invalid-path",
-        "body_too_large": "payload-too-large",
-        "unsupported_media_type": "unsupported-media-type",
-        "decompression_limit": "payload-too-large",
-        "headers_too_large": "headers-too-large",
-        "validation_failed": "validation-failed",
-        "rate_limit": "rate-limited",
-        "quota": "quota-exceeded",
-        "auth": "unauthenticated",
-        "authentication": "unauthenticated",
-        "authz": "forbidden",
-        "authorization": "forbidden",
-        "deadline_unviable": "deadline-unviable",
-        "idempotency_key_missing": "idempotency-key-missing",
-        "idempotency_conflict": "idempotency-conflict",
-        "idempotency_key_mismatch": "idempotency-key-mismatch",
-        "route_disabled": "route-disabled",
-        "upstream_unavailable": "upstream-unavailable",
-        "upstream_timeout": "upstream-timeout",
-        "internal_error": "internal-error",
-        "too_early": "too-early",
+        PipelineRejectionReasons.ADMISSION: ProblemTypeSlugs.OVERLOADED,
+        PipelineRejectionReasons.PRIORITY_SHED: ProblemTypeSlugs.OVERLOADED,
+        PipelineRejectionReasons.PRIORITY_SHEDDING: ProblemTypeSlugs.OVERLOADED,
+        PipelineRejectionReasons.ROUTE_NOT_FOUND: ProblemTypeSlugs.NOT_FOUND,
+        PipelineRejectionReasons.METHOD_NOT_ALLOWED: ProblemTypeSlugs.METHOD_NOT_ALLOWED,
+        PipelineRejectionReasons.PATH_NONCANONICAL: ProblemTypeSlugs.INVALID_PATH,
+        PipelineRejectionReasons.BODY_TOO_LARGE: ProblemTypeSlugs.PAYLOAD_TOO_LARGE,
+        PipelineRejectionReasons.UNSUPPORTED_MEDIA_TYPE: ProblemTypeSlugs.UNSUPPORTED_MEDIA_TYPE,
+        PipelineRejectionReasons.DECOMPRESSION_LIMIT: ProblemTypeSlugs.PAYLOAD_TOO_LARGE,
+        PipelineRejectionReasons.HEADERS_TOO_LARGE: ProblemTypeSlugs.HEADERS_TOO_LARGE,
+        PipelineRejectionReasons.VALIDATION_FAILED: ProblemTypeSlugs.VALIDATION_FAILED,
+        PipelineRejectionReasons.RATE_LIMIT: ProblemTypeSlugs.RATE_LIMITED,
+        PipelineRejectionReasons.QUOTA: ProblemTypeSlugs.QUOTA_EXCEEDED,
+        PipelineRejectionReasons.AUTH: ProblemTypeSlugs.UNAUTHENTICATED,
+        PipelineRejectionReasons.AUTHENTICATION: ProblemTypeSlugs.UNAUTHENTICATED,
+        PipelineRejectionReasons.AUTHZ: ProblemTypeSlugs.FORBIDDEN,
+        PipelineRejectionReasons.AUTHORIZATION: ProblemTypeSlugs.FORBIDDEN,
+        PipelineRejectionReasons.DEADLINE_UNVIABLE: ProblemTypeSlugs.DEADLINE_UNVIABLE,
+        PipelineRejectionReasons.IDEMPOTENCY_KEY_MISSING: ProblemTypeSlugs.IDEMPOTENCY_KEY_MISSING,
+        PipelineRejectionReasons.IDEMPOTENCY_CONFLICT: ProblemTypeSlugs.IDEMPOTENCY_CONFLICT,
+        PipelineRejectionReasons.IDEMPOTENCY_KEY_MISMATCH: ProblemTypeSlugs.IDEMPOTENCY_KEY_MISMATCH,
+        PipelineRejectionReasons.ROUTE_DISABLED: ProblemTypeSlugs.ROUTE_DISABLED,
+        PipelineRejectionReasons.UPSTREAM_UNAVAILABLE: ProblemTypeSlugs.UPSTREAM_UNAVAILABLE,
+        PipelineRejectionReasons.UPSTREAM_TIMEOUT: ProblemTypeSlugs.UPSTREAM_TIMEOUT,
+        PipelineRejectionReasons.INTERNAL_ERROR: ProblemTypeSlugs.INTERNAL_ERROR,
+        PipelineRejectionReasons.TOO_EARLY: ProblemTypeSlugs.TOO_EARLY,
     }
 
     TYPE_TITLES: Dict[str, str] = {
-        "overloaded": "Service overloaded",
-        "route-disabled": "Operation temporarily disabled",
-        "not-found": "Resource not found",
-        "method-not-allowed": "Method not allowed",
-        "invalid-path": "Invalid request path",
-        "payload-too-large": "Request body too large",
-        "headers-too-large": "Request headers too large",
-        "unsupported-media-type": "Unsupported media type",
-        "validation-failed": "Request does not match contract",
-        "rate-limited": "Too many requests",
-        "quota-exceeded": "Quota exceeded",
-        "unauthenticated": "Authentication required",
-        "forbidden": "Insufficient permissions",
-        "deadline-unviable": "Deadline too short to process",
-        "idempotency-key-missing": "Idempotency key required",
-        "idempotency-conflict": "Request with this key in progress",
-        "idempotency-key-mismatch": "Idempotency key reused with a different request",
-        "upstream-unavailable": "Dependency unavailable",
-        "upstream-timeout": "Dependency timed out",
-        "internal-error": "Internal error",
-        "too-early": "Request sent too early",
+        ProblemTypeSlugs.OVERLOADED: "Service overloaded",
+        ProblemTypeSlugs.ROUTE_DISABLED: "Operation temporarily disabled",
+        ProblemTypeSlugs.NOT_FOUND: "Resource not found",
+        ProblemTypeSlugs.METHOD_NOT_ALLOWED: "Method not allowed",
+        ProblemTypeSlugs.INVALID_PATH: "Invalid request path",
+        ProblemTypeSlugs.PAYLOAD_TOO_LARGE: "Request body too large",
+        ProblemTypeSlugs.HEADERS_TOO_LARGE: "Request headers too large",
+        ProblemTypeSlugs.UNSUPPORTED_MEDIA_TYPE: "Unsupported media type",
+        ProblemTypeSlugs.VALIDATION_FAILED: "Request does not match contract",
+        ProblemTypeSlugs.RATE_LIMITED: "Too many requests",
+        ProblemTypeSlugs.QUOTA_EXCEEDED: "Quota exceeded",
+        ProblemTypeSlugs.UNAUTHENTICATED: "Authentication required",
+        ProblemTypeSlugs.FORBIDDEN: "Insufficient permissions",
+        ProblemTypeSlugs.DEADLINE_UNVIABLE: "Deadline too short to process",
+        ProblemTypeSlugs.IDEMPOTENCY_KEY_MISSING: "Idempotency key required",
+        ProblemTypeSlugs.IDEMPOTENCY_CONFLICT: "Request with this key in progress",
+        ProblemTypeSlugs.IDEMPOTENCY_KEY_MISMATCH: "Idempotency key reused with a different request",
+        ProblemTypeSlugs.UPSTREAM_UNAVAILABLE: "Dependency unavailable",
+        ProblemTypeSlugs.UPSTREAM_TIMEOUT: "Dependency timed out",
+        ProblemTypeSlugs.INTERNAL_ERROR: "Internal error",
+        ProblemTypeSlugs.TOO_EARLY: "Request sent too early",
     }
 
     STATUS_TITLES: Dict[int, str] = {
@@ -87,12 +91,12 @@ class ProblemDetailsRules:
     }
 
     RETRYABLE_TYPES: set = {
-        "overloaded",
-        "rate-limited",
-        "quota-exceeded",
-        "idempotency-conflict",
-        "upstream-unavailable",
-        "too-early",
+        ProblemTypeSlugs.OVERLOADED,
+        ProblemTypeSlugs.RATE_LIMITED,
+        ProblemTypeSlugs.QUOTA_EXCEEDED,
+        ProblemTypeSlugs.IDEMPOTENCY_CONFLICT,
+        ProblemTypeSlugs.UPSTREAM_UNAVAILABLE,
+        ProblemTypeSlugs.TOO_EARLY,
     }
 
     @classmethod
