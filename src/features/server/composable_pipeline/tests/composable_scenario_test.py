@@ -233,3 +233,37 @@ async def test_scenario_idempotency_key_missing_enforced() -> None:
     assert res.problem_details.title == "Idempotency key required"
     assert res.context is not None
     assert res.context.rejection_reason == "idempotency_key_missing"
+
+@pytest.mark.asyncio
+async def test_scenario_idempotency_conflict_enforced() -> None:
+    custom_routes = [
+        RouteDefinition(
+            path_template="/api/v1/payments",
+            allowed_methods={"POST"},
+            handler_name="payments_handler",
+            idempotency_key_required=True,
+        )
+    ]
+    pipeline = ComposablePipelineService(routes=custom_routes)
+    req1 = IngressRequest(
+        method="POST",
+        path="/api/v1/payments",
+        headers={"Authorization": "Bearer test-token-tenant1", "idempotency-key": "tx-12345"},
+    )
+    res1 = await pipeline.execute(req1)
+    assert res1.status_code == 200
+
+    req2 = IngressRequest(
+        method="POST",
+        path="/api/v1/payments",
+        headers={"Authorization": "Bearer test-token-tenant1", "idempotency-key": "tx-12345"},
+    )
+    res2 = await pipeline.execute(req2)
+    assert res2.status_code == 409
+    assert res2.problem_details is not None
+    assert res2.problem_details.status == 409
+    assert res2.problem_details.type.endswith("idempotency-conflict")
+    assert res2.problem_details.title == "Request with this key in progress"
+    assert res2.context is not None
+    assert res2.context.rejection_reason == "idempotency_conflict"
+

@@ -16,6 +16,12 @@ from src.features.server.composable_pipeline.domain.rules.pipeline_config_valida
 from src.features.server.composable_pipeline.infrastructure.adapters.asgi_pipeline_adapter import (
     AsgiPipelineAdapter,
 )
+from src.features.server.composable_pipeline.infrastructure.ports.idempotency_store_port import (
+    IdempotencyStorePort,
+)
+from src.features.server.composable_pipeline.infrastructure.adapters.in_memory_idempotency_store_adapter import (
+    InMemoryIdempotencyStoreAdapter,
+)
 from src.features.server.composable_pipeline.service.composable_pipeline_service import (
     ComposablePipelineService,
 )
@@ -31,4 +37,6 @@ __all__ = [
     "PipelineConfigValidationRules",
     "ComposablePipelineService",
     "AsgiPipelineAdapter",
+    "IdempotencyStorePort",
+    "InMemoryIdempotencyStoreAdapter",
 ]

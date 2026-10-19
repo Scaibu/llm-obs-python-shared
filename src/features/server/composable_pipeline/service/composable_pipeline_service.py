@@ -100,6 +100,11 @@ class ComposablePipelineService:
             pipeline_cfg.get("problem_details_type_base", "https://errors.example.com/problems/"),
         )
 
+        from src.features.server.composable_pipeline.infrastructure.adapters.in_memory_idempotency_store_adapter import (
+            InMemoryIdempotencyStoreAdapter,
+        )
+
+        self.idempotency_store = InMemoryIdempotencyStoreAdapter()
         admission_cfg = unified_cfg.get("global_admission", {})
         self.max_global_concurrency = admission_cfg.get("max_concurrency", self.policy.limits.global_admission_limit)
         self.access_logs: List[AccessLogEntry] = []
@@ -246,6 +251,23 @@ class ComposablePipelineService:
                                     detail="Idempotency-Key header is required for this route",
                                     instance=ctx.request_id,
                                     reason="idempotency_key_missing",
+                                    base_url=self.problem_base_url,
+                                ),
+                                context=ctx,
+                            )
+                        acquired = await self.idempotency_store.try_acquire(idempotency_header)
+                        if not acquired:
+                            ctx.status_code = 409
+                            ctx.is_failed = True
+                            ctx.rejection_reason = "idempotency_conflict"
+                            return IngressResponse(
+                                status_code=409,
+                                headers={"x-request-id": ctx.request_id},
+                                problem_details=ProblemDetailsRules.create_problem(
+                                    status=409,
+                                    detail="A request with this Idempotency-Key is currently in progress",
+                                    instance=ctx.request_id,
+                                    reason="idempotency_conflict",
                                     base_url=self.problem_base_url,
                                 ),
                                 context=ctx,
