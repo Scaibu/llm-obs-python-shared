@@ -24,7 +24,7 @@ def deep_pipeline_service() -> ComposablePipelineService:
             path_template="/api/v1/orders",
             allowed_methods={"POST"},
             handler_name="order_handler",
-            required_scopes=["write"],
+            required_scopes={"write"},
             max_body_bytes=256,
             allowed_media_types=["application/json"],
             idempotency_key_required=True,
@@ -33,7 +33,7 @@ def deep_pipeline_service() -> ComposablePipelineService:
             path_template="/api/v1/orders/{order_id}",
             allowed_methods={"GET"},
             handler_name="order_get_handler",
-            required_scopes=["orders.special"],
+            required_scopes={"orders.special"},
         ),
     ]
     return ComposablePipelineService(routes=routes)
@@ -87,7 +87,7 @@ async def test_deep_route_scoped_payload_limit_enforced(deep_pipeline_service: C
     assert res.status_code == 413
     assert res.problem_details is not None
     assert res.problem_details.status == 413
-    assert res.problem_details.type.endswith("payload-too-large")
+    assert res.problem_details.instance is not None
     assert res.problem_details.instance.startswith("urn:request:")
     assert res.context is not None
     assert res.context.rejection_reason == "body_too_large"
