@@ -42,6 +42,7 @@ from src.features.server.composable_pipeline.domain.rules.path_canonicalization_
     PathCanonicalizationRules,
     RequestMutationRules,
 )
+from src.features.server.composable_pipeline.domain.rules.cors_csrf_rules import CorsAndCsrfRules
 from src.python_shared.telemetry.tracer import trace_pipeline_stage
 from src.features.server.pipeline_identity import PipelineIdentityService, StandardIdentityAdapter, IdentityInputDTO
 from src.features.server.pipeline_peer_resolution import PipelinePeerResolutionService, StandardPeerConfigAdapter, PeerResolutionInputDTO
@@ -70,6 +71,8 @@ class ComposablePipelineService:
         routes: Optional[List[RouteDefinition]] = None,
         policy: Optional[ServerPolicySnapshot] = None,
         config_path: Optional[str] = None,
+        idempotency_store: Optional[Any] = None,
+        quota_port: Optional[Any] = None,
     ) -> None:
         import os
         import yaml  # type: ignore[import-untyped]
@@ -103,7 +106,14 @@ class ComposablePipelineService:
         self.stage_pre_auth = PipelinePreAuthLimitService(limiter=InMemoryPreAuthRateLimitAdapter())
         self.stage_auth = PipelineAuthenticationService(verifier=StandardTokenVerifierAdapter())
         self.stage_authz = PipelineAuthorizationService()
-        self.stage_quota = PipelineTenantQuotaService(quota_port=InMemoryTenantQuotaAdapter())
+
+        from src.features.server.composable_pipeline.infrastructure.adapters.in_memory_idempotency_store_adapter import (
+            InMemoryIdempotencyStoreAdapter,
+        )
+        self.idempotency_store = idempotency_store if idempotency_store is not None else InMemoryIdempotencyStoreAdapter()
+
+        tenant_port = quota_port if quota_port is not None else InMemoryTenantQuotaAdapter()
+        self.stage_quota = PipelineTenantQuotaService(quota_port=tenant_port)
         self.stage_deadline = PipelineDeadlineService()
         self.stage_priority = PipelinePriorityAdmissionService()
         self.stage_ingress = PipelineHandlerIngressService(dispatcher=InMemoryDomainDispatcherAdapter())
@@ -115,14 +125,21 @@ class ComposablePipelineService:
             pipeline_cfg.get("problem_details_type_base", "https://errors.example.com/problems/"),
         )
 
-        from src.features.server.composable_pipeline.infrastructure.adapters.in_memory_idempotency_store_adapter import (
-            InMemoryIdempotencyStoreAdapter,
-        )
-
-        self.idempotency_store = InMemoryIdempotencyStoreAdapter()
         admission_cfg = unified_cfg.get("global_admission", {})
         self.max_global_concurrency = admission_cfg.get("max_concurrency", self.policy.limits.global_admission_limit)
         self.access_logs: List[AccessLogEntry] = []
+
+        cors_cfg = unified_cfg.get("cors", {})
+        self.cors_enabled: bool = cors_cfg.get("enabled", True)
+        self.allowed_origins: List[str] = cors_cfg.get("allowed_origins", ["*"])
+        self.cors_allowed_methods: List[str] = cors_cfg.get("allowed_methods", ["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+        self.cors_allowed_headers: List[str] = cors_cfg.get("allowed_headers", ["authorization", "content-type", "x-request-id", "x-csrf-token", "idempotency-key"])
+        self.cors_max_age_seconds: int = cors_cfg.get("max_age_seconds", 86400)
+        self.cors_allow_credentials: bool = cors_cfg.get("allow_credentials", False)
+
+        csrf_cfg = unified_cfg.get("csrf", {})
+        self.csrf_enabled: bool = csrf_cfg.get("enabled", False)
+        self.csrf_header_name: str = csrf_cfg.get("header_name", PipelineHeaders.X_CSRF_TOKEN)
 
     async def execute(self, req: IngressRequest) -> IngressResponse:
         start_time = time.monotonic()
@@ -167,6 +184,46 @@ class ComposablePipelineService:
                     )
 
             try:
+                origin_header = req.headers.get(PipelineHeaders.ORIGIN)
+                if self.cors_enabled and CorsAndCsrfRules.is_cors_request(origin_header):
+                    if not CorsAndCsrfRules.is_origin_allowed(origin_header or "", self.allowed_origins):
+                        return ResponseFactoryRules.create_rejection(
+                            ctx=ctx,
+                            status_code=403,
+                            reason=PipelineRejectionReasons.CORS_FORBIDDEN,
+                            detail=PipelineProblemDetails.CORS_ORIGIN_NOT_ALLOWED,
+                            problem_base_url=self.problem_base_url,
+                        )
+                    if CorsAndCsrfRules.is_preflight_request(req.method, bool(origin_header)):
+                        cors_headers = {
+                            PipelineHeaders.ACCESS_CONTROL_ALLOW_ORIGIN: origin_header or "*",
+                            PipelineHeaders.ACCESS_CONTROL_ALLOW_METHODS: ", ".join(self.cors_allowed_methods),
+                            PipelineHeaders.ACCESS_CONTROL_ALLOW_HEADERS: ", ".join(self.cors_allowed_headers),
+                            PipelineHeaders.ACCESS_CONTROL_MAX_AGE: str(self.cors_max_age_seconds),
+                        }
+                        return ResponseFactoryRules.create_success(
+                            ctx=ctx,
+                            status_code=204,
+                            response_body=None,
+                            extra_headers=cors_headers,
+                        )
+
+                if CorsAndCsrfRules.is_csrf_check_required(
+                    req.method,
+                    bool(origin_header),
+                    req.headers.get(PipelineHeaders.AUTHORIZATION),
+                    self.csrf_enabled,
+                ):
+                    client_csrf = req.headers.get(self.csrf_header_name)
+                    if not client_csrf:
+                        return ResponseFactoryRules.create_rejection(
+                            ctx=ctx,
+                            status_code=403,
+                            reason=PipelineRejectionReasons.CSRF_INVALID,
+                            detail=PipelineProblemDetails.CSRF_TOKEN_MISSING_OR_INVALID,
+                            problem_base_url=self.problem_base_url,
+                        )
+
                 if not PathCanonicalizationRules.is_canonical_path(req.path):
                     return ResponseFactoryRules.create_rejection(
                         ctx=ctx,

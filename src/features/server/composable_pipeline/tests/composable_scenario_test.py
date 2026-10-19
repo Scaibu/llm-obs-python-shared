@@ -267,3 +267,59 @@ async def test_scenario_idempotency_conflict_enforced() -> None:
     assert res2.context is not None
     assert res2.context.rejection_reason == "idempotency_conflict"
 
+
+@pytest.mark.asyncio
+async def test_cors_preflight_and_origin_handling() -> None:
+    pipeline = ComposablePipelineService()
+    options_req = IngressRequest(
+        method="OPTIONS",
+        path="/api/v1/resource",
+        headers={"origin": "https://dashboard.example.com"},
+    )
+    options_res = await pipeline.execute(options_req)
+    assert options_res.status_code == 204
+    assert options_res.headers.get("access-control-allow-origin") == "https://dashboard.example.com"
+    assert "access-control-allow-methods" in options_res.headers
+
+
+@pytest.mark.asyncio
+async def test_csrf_protection_guard_clause() -> None:
+    pipeline = ComposablePipelineService()
+    pipeline.csrf_enabled = True
+    mutating_browser_req = IngressRequest(
+        method="POST",
+        path="/api/v1/resource",
+        headers={"origin": "https://dashboard.example.com"},
+    )
+    csrf_res = await pipeline.execute(mutating_browser_req)
+    assert csrf_res.status_code == 403
+    assert csrf_res.problem_details is not None
+    assert csrf_res.problem_details.status == 403
+    assert csrf_res.context is not None
+    assert csrf_res.context.rejection_reason == "csrf_invalid"
+
+
+@pytest.mark.asyncio
+async def test_distributed_redis_adapters_execution() -> None:
+    from src.features.server.composable_pipeline.infrastructure.adapters.distributed_redis_idempotency_store_adapter import (
+        DistributedRedisIdempotencyStoreAdapter,
+    )
+    from src.features.server.composable_pipeline.infrastructure.adapters.distributed_redis_tenant_quota_adapter import (
+        DistributedRedisTenantQuotaAdapter,
+    )
+
+    redis_idemp = DistributedRedisIdempotencyStoreAdapter(redis_client=None)
+    redis_quota = DistributedRedisTenantQuotaAdapter(redis_client=None)
+    pipeline = ComposablePipelineService(
+        idempotency_store=redis_idemp,
+        quota_port=redis_quota,
+    )
+
+    req = IngressRequest(
+        method="GET",
+        path="/api/v1/resource",
+        headers={"Authorization": "Bearer test-token-tenant1"},
+    )
+    res = await pipeline.execute(req)
+    assert res.status_code == 200
+

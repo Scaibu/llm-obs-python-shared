@@ -17,12 +17,23 @@ class PipelineHeaders:
     ALLOW: Final[str] = "Allow"
     RETRY_AFTER: Final[str] = "Retry-After"
     WWW_AUTHENTICATE: Final[str] = "WWW-Authenticate"
+    ORIGIN: Final[str] = "origin"
+    ACCESS_CONTROL_ALLOW_ORIGIN: Final[str] = "access-control-allow-origin"
+    ACCESS_CONTROL_ALLOW_METHODS: Final[str] = "access-control-allow-methods"
+    ACCESS_CONTROL_ALLOW_HEADERS: Final[str] = "access-control-allow-headers"
+    ACCESS_CONTROL_MAX_AGE: Final[str] = "access-control-max-age"
+    ACCESS_CONTROL_ALLOW_CREDENTIALS: Final[str] = "access-control-allow-credentials"
+    ACCESS_CONTROL_REQUEST_METHOD: Final[str] = "access-control-request-method"
+    ACCESS_CONTROL_REQUEST_HEADERS: Final[str] = "access-control-request-headers"
+    X_CSRF_TOKEN: Final[str] = "x-csrf-token"
 
 
 class PipelineRejectionReasons:
     ADMISSION: Final[str] = "admission"
     PRIORITY_SHED: Final[str] = "priority_shed"
     PRIORITY_SHEDDING: Final[str] = "priority_shedding"
+    CORS_FORBIDDEN: Final[str] = "cors_forbidden"
+    CSRF_INVALID: Final[str] = "csrf_invalid"
     ROUTE_NOT_FOUND: Final[str] = "route_not_found"
     METHOD_NOT_ALLOWED: Final[str] = "method_not_allowed"
     PATH_NONCANONICAL: Final[str] = "path_noncanonical"
@@ -70,6 +81,8 @@ class ProblemTypeSlugs:
     UPSTREAM_TIMEOUT: Final[str] = "upstream-timeout"
     INTERNAL_ERROR: Final[str] = "internal-error"
     TOO_EARLY: Final[str] = "too-early"
+    CORS_FORBIDDEN: Final[str] = "cors-forbidden"
+    CSRF_INVALID: Final[str] = "csrf-invalid"
 
 
 class PipelineMediaTypes:
@@ -130,3 +143,5 @@ class PipelineProblemDetails:
     DEADLINE_UNVIABLE_DETAIL: Final[str] = "Deadline expired or insufficient timeout budget"
     PRIORITY_SHEDDING_DETAIL: Final[str] = "Shedding low priority class"
     INTERNAL_SERVER_ERROR: Final[str] = "Internal Server Error"
+    CORS_ORIGIN_NOT_ALLOWED: Final[str] = "Origin not allowed by CORS policy"
+    CSRF_TOKEN_MISSING_OR_INVALID: Final[str] = "CSRF token missing or invalid for browser request"

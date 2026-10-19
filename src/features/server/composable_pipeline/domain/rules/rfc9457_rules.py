@@ -47,6 +47,8 @@ class ProblemDetailsRules:
         PipelineRejectionReasons.UPSTREAM_TIMEOUT: ProblemTypeSlugs.UPSTREAM_TIMEOUT,
         PipelineRejectionReasons.INTERNAL_ERROR: ProblemTypeSlugs.INTERNAL_ERROR,
         PipelineRejectionReasons.TOO_EARLY: ProblemTypeSlugs.TOO_EARLY,
+        PipelineRejectionReasons.CORS_FORBIDDEN: ProblemTypeSlugs.CORS_FORBIDDEN,
+        PipelineRejectionReasons.CSRF_INVALID: ProblemTypeSlugs.CSRF_INVALID,
     }
 
     TYPE_TITLES: Dict[str, str] = {
@@ -71,6 +73,8 @@ class ProblemDetailsRules:
         ProblemTypeSlugs.UPSTREAM_TIMEOUT: "Dependency timed out",
         ProblemTypeSlugs.INTERNAL_ERROR: "Internal error",
         ProblemTypeSlugs.TOO_EARLY: "Request sent too early",
+        ProblemTypeSlugs.CORS_FORBIDDEN: "CORS origin rejected",
+        ProblemTypeSlugs.CSRF_INVALID: "CSRF verification failed",
     }
 
     STATUS_TITLES: Dict[int, str] = {

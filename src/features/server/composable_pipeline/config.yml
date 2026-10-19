@@ -8,6 +8,29 @@ pipeline:
   limit_scope: per_replica
   reloadable: true
 
+cors:
+  enabled: true
+  allowed_origins:
+    - "*"
+  allowed_methods:
+    - GET
+    - POST
+    - PUT
+    - DELETE
+    - OPTIONS
+  allowed_headers:
+    - authorization
+    - content-type
+    - x-request-id
+    - x-csrf-token
+    - idempotency-key
+  max_age_seconds: 86400
+  allow_credentials: false
+
+csrf:
+  enabled: false
+  header_name: x-csrf-token
+
 outer_wrapper:
   problem_type_base: https://errors.example.com/problems/
   rejection_types:
