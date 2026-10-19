@@ -472,15 +472,20 @@ class ComposablePipelineService:
             )
         finally:
             duration = time.monotonic() - start_time
+            bytes_in = len(req.body) if req.body else 0
             log_entry = AccessLogEntry(
                 request_id=ctx.request_id,
                 trace_id=ctx.trace_id,
                 route=ctx.matched_route or req.path,
+                method=req.method,
                 peer=ctx.resolved_peer_ip,
                 principal=ctx.principal_id,
+                tenant_id=ctx.tenant_id,
                 status=ctx.status_code,
                 reason=ctx.rejection_reason,
                 duration_seconds=duration,
+                bytes_in=bytes_in,
+                bytes_out=0,
             )
             self.access_logs.append(log_entry)
             if ctx.status_code >= 400:

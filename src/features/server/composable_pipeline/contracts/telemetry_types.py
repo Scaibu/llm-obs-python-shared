@@ -9,8 +9,10 @@ class AccessLogEntry(BaseModel):
     request_id: str
     trace_id: str
     route: str
+    method: str = "GET"
     peer: str
     principal: Optional[str] = None
+    tenant_id: Optional[str] = None
     status: int
     reason: Optional[str] = None
     duration_seconds: float
