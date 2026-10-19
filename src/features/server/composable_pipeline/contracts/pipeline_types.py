@@ -35,6 +35,7 @@ class PipelineRequestContext(BaseModel):
     is_failed: bool = False
     rejection_reason: Optional[str] = None
     status_code: int = 200
+    bytes_out: int = 0
 
 class IngressResponse(BaseModel):
     status_code: int = 200

@@ -3,6 +3,7 @@ Blueprint:
 - ResponseFactoryRules: Centralized rule engine creating standardized IngressResponse envelopes.
 - Eliminates repeated boilerplate across pipeline stages, ensuring DRY, consistent headers, status codes, and RFC 9457 Problem Details envelopes.
 """
+import json
 from typing import Any, Dict, Optional
 from src.features.server.composable_pipeline.contracts.pipeline_constants import PipelineHeaders
 from src.features.server.composable_pipeline.contracts.pipeline_types import (
@@ -13,6 +14,24 @@ from src.features.server.composable_pipeline.domain.rules.rfc9457_rules import P
 
 
 class ResponseFactoryRules:
+    @staticmethod
+    def _compute_bytes(payload: Any) -> int:
+        if payload is None:
+            return 0
+        if isinstance(payload, bytes):
+            return len(payload)
+        if isinstance(payload, str):
+            return len(payload.encode("utf-8"))
+        try:
+            return len(
+                json.dumps(
+                    payload,
+                    default=lambda o: o.decode("utf-8", errors="replace") if isinstance(o, bytes) else str(o),
+                ).encode("utf-8")
+            )
+        except Exception:
+            return len(str(payload).encode("utf-8"))
+
     @staticmethod
     def create_rejection(
         ctx: PipelineRequestContext,
@@ -41,6 +60,7 @@ class ResponseFactoryRules:
             base_url=problem_base_url,
             retry_after_seconds=retry_after_seconds,
         )
+        ctx.bytes_out = len(problem.model_dump_json().encode("utf-8"))
 
         return IngressResponse(
             status_code=status_code,
@@ -57,6 +77,7 @@ class ResponseFactoryRules:
         extra_headers: Optional[Dict[str, str]] = None,
     ) -> IngressResponse:
         ctx.status_code = status_code
+        ctx.bytes_out = ResponseFactoryRules._compute_bytes(response_body)
         headers: Dict[str, str] = {
             PipelineHeaders.REQUEST_ID: ctx.request_id,
             PipelineHeaders.TRACEPARENT: ctx.trace_id,

@@ -495,7 +495,7 @@ class ComposablePipelineService:
                 reason=ctx.rejection_reason,
                 duration_seconds=duration,
                 bytes_in=bytes_in,
-                bytes_out=0,
+                bytes_out=ctx.bytes_out,
             )
             self.access_logs.append(log_entry)
             if ctx.status_code >= 400:

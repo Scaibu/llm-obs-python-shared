@@ -367,3 +367,51 @@ async def test_distributed_redis_adapters_with_active_redis_mock() -> None:
     assert allowed is True
     assert mock_redis.eval.called
 
+
+def test_in_memory_rate_limiters_lru_and_ttl_eviction() -> None:
+    from src.features.server.pipeline_pre_auth_limit.infrastructure.adapters.pipeline_pre_auth_limit_adapter import (
+        InMemoryPreAuthRateLimitAdapter,
+    )
+    from src.features.server.pipeline_tenant_quota.infrastructure.adapters.pipeline_tenant_quota_adapter import (
+        InMemoryTenantQuotaAdapter,
+    )
+
+    pre_auth_adapter = InMemoryPreAuthRateLimitAdapter(max_entries=3, idle_ttl_seconds=10.0)
+    assert pre_auth_adapter.consume("1.1.1.1", tokens=10, refill_rate=1.0) is True
+    assert pre_auth_adapter.consume("2.2.2.2", tokens=10, refill_rate=1.0) is True
+    assert pre_auth_adapter.consume("3.3.3.3", tokens=10, refill_rate=1.0) is True
+    assert len(pre_auth_adapter._buckets) == 3
+
+    assert pre_auth_adapter.consume("4.4.4.4", tokens=10, refill_rate=1.0) is True
+    assert len(pre_auth_adapter._buckets) == 3
+    assert "1.1.1.1" not in pre_auth_adapter._buckets
+    assert "4.4.4.4" in pre_auth_adapter._buckets
+
+    quota_adapter = InMemoryTenantQuotaAdapter(max_entries=3, idle_ttl_seconds=10.0)
+    assert quota_adapter.consume_tenant_quota("tenant-1", tokens=10, refill_rate=1.0) is True
+    assert quota_adapter.consume_tenant_quota("tenant-2", tokens=10, refill_rate=1.0) is True
+    assert quota_adapter.consume_tenant_quota("tenant-3", tokens=10, refill_rate=1.0) is True
+    assert len(quota_adapter._buckets) == 3
+
+    assert quota_adapter.consume_tenant_quota("tenant-4", tokens=10, refill_rate=1.0) is True
+    assert len(quota_adapter._buckets) == 3
+    assert "tenant-1" not in quota_adapter._buckets
+    assert "tenant-4" in quota_adapter._buckets
+
+
+@pytest.mark.asyncio
+async def test_access_log_records_positive_bytes_out() -> None:
+    pipeline = ComposablePipelineService()
+    req = IngressRequest(
+        method="GET",
+        path="/api/v1/resource",
+        headers={"Authorization": "Bearer test-token-tenant1"},
+    )
+    res = await pipeline.execute(req)
+    assert res.status_code == 200
+    assert len(pipeline.access_logs) > 0
+    latest_log = pipeline.access_logs[-1]
+    assert latest_log.bytes_out > 0
+    assert res.context is not None
+    assert res.context.bytes_out == latest_log.bytes_out
+
