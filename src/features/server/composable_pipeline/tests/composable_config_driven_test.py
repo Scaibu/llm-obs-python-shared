@@ -55,7 +55,8 @@ async def test_declared_route_limit_enforced(config_driven_pipeline: ComposableP
     assert res.status_code == 413
     assert res.problem_details is not None
     assert res.problem_details.status == 413
-    assert res.problem_details.title == "Payload Too Large"
+    assert res.problem_details.title == "Request body too large"
+    assert res.problem_details.type.endswith("payload-too-large")
 
 @pytest.mark.asyncio
 async def test_per_route_scope_enforcement() -> None:

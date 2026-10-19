@@ -84,6 +84,13 @@ class ComposablePipelineService:
         self.stage_priority = PipelinePriorityAdmissionService()
         self.stage_ingress = PipelineHandlerIngressService(dispatcher=InMemoryDomainDispatcherAdapter())
 
+        outer_cfg = unified_cfg.get("outer_wrapper", {})
+        pipeline_cfg = unified_cfg.get("pipeline", {})
+        self.problem_base_url: str = outer_cfg.get(
+            "problem_type_base",
+            pipeline_cfg.get("problem_details_type_base", "https://errors.example.com/problems/"),
+        )
+
         admission_cfg = unified_cfg.get("global_admission", {})
         self.max_global_concurrency = admission_cfg.get("max_concurrency", self.policy.limits.global_admission_limit)
         self.access_logs: List[AccessLogEntry] = []
@@ -127,7 +134,14 @@ class ComposablePipelineService:
                     return IngressResponse(
                         status_code=503,
                         headers={"Retry-After": str(adm_out.retry_after_seconds), "x-request-id": ctx.request_id},
-                        problem_details=ProblemDetailsRules.create_problem(503, "Global capacity exceeded", ctx.request_id),
+                        problem_details=ProblemDetailsRules.create_problem(
+                            status=503,
+                            detail="Global capacity exceeded",
+                            instance=ctx.request_id,
+                            reason=ctx.rejection_reason,
+                            base_url=self.problem_base_url,
+                            retry_after_seconds=adm_out.retry_after_seconds,
+                        ),
                         context=ctx,
                     )
 
@@ -147,18 +161,30 @@ class ComposablePipelineService:
                         return IngressResponse(
                             status_code=route_out.status_code,
                             headers=headers,
-                            problem_details=ProblemDetailsRules.create_problem(route_out.status_code, "Route matching failed", ctx.request_id),
+                            problem_details=ProblemDetailsRules.create_problem(
+                                status=route_out.status_code,
+                                detail="Route matching failed" if route_out.status_code == 404 else "Method not allowed for this route",
+                                instance=ctx.request_id,
+                                reason=ctx.rejection_reason,
+                                base_url=self.problem_base_url,
+                            ),
                             context=ctx,
                         )
 
                     if route_out.route is None:
                         ctx.status_code = 500
                         ctx.is_failed = True
-                        ctx.rejection_reason = "internal_routing_error"
+                        ctx.rejection_reason = "internal_error"
                         return IngressResponse(
                             status_code=500,
                             headers={"x-request-id": ctx.request_id},
-                            problem_details=ProblemDetailsRules.create_problem(500, "Internal routing error", ctx.request_id),
+                            problem_details=ProblemDetailsRules.create_problem(
+                                status=500,
+                                detail="Internal routing error",
+                                instance=ctx.request_id,
+                                reason="internal_error",
+                                base_url=self.problem_base_url,
+                            ),
                             context=ctx,
                         )
 
@@ -180,7 +206,13 @@ class ComposablePipelineService:
                         return IngressResponse(
                             status_code=limits_out.status_code,
                             headers={"x-request-id": ctx.request_id},
-                            problem_details=ProblemDetailsRules.create_problem(limits_out.status_code, limits_out.rejection_reason or "Route limit violated", ctx.request_id),
+                            problem_details=ProblemDetailsRules.create_problem(
+                                status=limits_out.status_code,
+                                detail=limits_out.rejection_reason or "Route limit violated",
+                                instance=ctx.request_id,
+                                reason=ctx.rejection_reason,
+                                base_url=self.problem_base_url,
+                            ),
                             context=ctx,
                         )
 
@@ -196,7 +228,14 @@ class ComposablePipelineService:
                         return IngressResponse(
                             status_code=429,
                             headers={"Retry-After": str(pre_auth_out.retry_after_seconds), "x-request-id": ctx.request_id},
-                            problem_details=ProblemDetailsRules.create_problem(429, "Too many requests from peer IP", ctx.request_id),
+                            problem_details=ProblemDetailsRules.create_problem(
+                                status=429,
+                                detail="Too many requests from peer IP",
+                                instance=ctx.request_id,
+                                reason="rate_limit",
+                                base_url=self.problem_base_url,
+                                retry_after_seconds=pre_auth_out.retry_after_seconds,
+                            ),
                             context=ctx,
                         )
 
@@ -212,7 +251,13 @@ class ComposablePipelineService:
                         return IngressResponse(
                             status_code=401,
                             headers={"WWW-Authenticate": "Bearer", "x-request-id": ctx.request_id},
-                            problem_details=ProblemDetailsRules.create_problem(401, auth_out.rejection_reason or "Authentication required", ctx.request_id),
+                            problem_details=ProblemDetailsRules.create_problem(
+                                status=401,
+                                detail=auth_out.rejection_reason or "Authentication required",
+                                instance=ctx.request_id,
+                                reason="auth",
+                                base_url=self.problem_base_url,
+                            ),
                             context=ctx,
                         )
 
@@ -238,7 +283,13 @@ class ComposablePipelineService:
                         return IngressResponse(
                             status_code=403,
                             headers={"x-request-id": ctx.request_id},
-                            problem_details=ProblemDetailsRules.create_problem(403, "Insufficient scopes", ctx.request_id),
+                            problem_details=ProblemDetailsRules.create_problem(
+                                status=403,
+                                detail="Insufficient scopes for route",
+                                instance=ctx.request_id,
+                                reason="authz",
+                                base_url=self.problem_base_url,
+                            ),
                             context=ctx,
                         )
 
@@ -258,7 +309,14 @@ class ComposablePipelineService:
                         return IngressResponse(
                             status_code=429,
                             headers={"Retry-After": str(quota_out.retry_after_seconds), "x-request-id": ctx.request_id},
-                            problem_details=ProblemDetailsRules.create_problem(429, "Tenant quota exhausted", ctx.request_id),
+                            problem_details=ProblemDetailsRules.create_problem(
+                                status=429,
+                                detail="Tenant quota exhausted",
+                                instance=ctx.request_id,
+                                reason="quota",
+                                base_url=self.problem_base_url,
+                                retry_after_seconds=quota_out.retry_after_seconds,
+                            ),
                             context=ctx,
                         )
 
@@ -275,7 +333,13 @@ class ComposablePipelineService:
                         return IngressResponse(
                             status_code=504,
                             headers={"x-request-id": ctx.request_id},
-                            problem_details=ProblemDetailsRules.create_problem(504, "Deadline expired or insufficient timeout budget", ctx.request_id),
+                            problem_details=ProblemDetailsRules.create_problem(
+                                status=504,
+                                detail="Deadline expired or insufficient timeout budget",
+                                instance=ctx.request_id,
+                                reason="deadline_unviable",
+                                base_url=self.problem_base_url,
+                            ),
                             context=ctx,
                         )
 
@@ -296,7 +360,14 @@ class ComposablePipelineService:
                         return IngressResponse(
                             status_code=503,
                             headers={"Retry-After": str(priority_out.retry_after_seconds), "x-request-id": ctx.request_id},
-                            problem_details=ProblemDetailsRules.create_problem(503, "Shedding low priority class", ctx.request_id),
+                            problem_details=ProblemDetailsRules.create_problem(
+                                status=503,
+                                detail="Shedding low priority class",
+                                instance=ctx.request_id,
+                                reason="priority_shedding",
+                                base_url=self.problem_base_url,
+                                retry_after_seconds=priority_out.retry_after_seconds,
+                            ),
                             context=ctx,
                         )
 
@@ -327,7 +398,13 @@ class ComposablePipelineService:
             return IngressResponse(
                 status_code=500,
                 headers={"x-request-id": ctx.request_id},
-                problem_details=ProblemDetailsRules.create_problem(500, "Internal Server Error", ctx.request_id),
+                problem_details=ProblemDetailsRules.create_problem(
+                    status=500,
+                    detail="Internal Server Error",
+                    instance=ctx.request_id,
+                    reason="internal_error",
+                    base_url=self.problem_base_url,
+                ),
                 context=ctx,
             )
         finally:

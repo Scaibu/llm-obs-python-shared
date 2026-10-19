@@ -11,4 +11,7 @@ class ProblemDetails(BaseModel):
     status: int
     detail: Optional[str] = None
     instance: Optional[str] = None
+    request_id: Optional[str] = None
+    retryable: bool = False
+    retry_after_seconds: Optional[int] = None
     extensions: Dict[str, Any] = Field(default_factory=dict)

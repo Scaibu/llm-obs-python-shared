@@ -19,13 +19,21 @@ outer_wrapper:
     body_too_large: payload-too-large
     unsupported_media_type: unsupported-media-type
     decompression_limit: payload-too-large
+    headers_too_large: headers-too-large
+    validation_failed: validation-failed
     rate_limit: rate-limited
     quota: quota-exceeded
     authentication: unauthenticated
     authorization: forbidden
     deadline_unviable: deadline-unviable
+    idempotency_key_missing: idempotency-key-missing
     idempotency_conflict: idempotency-conflict
+    idempotency_key_mismatch: idempotency-key-mismatch
     route_disabled: route-disabled
+    upstream_unavailable: upstream-unavailable
+    upstream_timeout: upstream-timeout
+    internal_error: internal-error
+    too_early: too-early
   access_log:
     enabled: true
     field_allowlist:
