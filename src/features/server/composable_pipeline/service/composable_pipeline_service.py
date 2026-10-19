@@ -18,7 +18,7 @@ Blueprint:
 """
 import time
 import logging
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from src.features.server.composable_pipeline.contracts.pipeline_types import (
     IngressRequest,
     IngressResponse,
@@ -50,12 +50,25 @@ class ComposablePipelineService:
         self,
         routes: Optional[List[RouteDefinition]] = None,
         policy: Optional[ServerPolicySnapshot] = None,
+        config_path: Optional[str] = None,
     ) -> None:
+        import os
+        import yaml  # type: ignore[import-untyped]
+        cfg_file = config_path or os.path.join(os.path.dirname(__file__), "../config.yml")
+        unified_cfg: Dict[str, Any] = {}
+        if os.path.exists(cfg_file):
+            with open(cfg_file, "r") as f:
+                unified_cfg = yaml.safe_load(f) or {}
+
         self.policy = policy if policy is not None else ServerPolicySnapshot()
         self.stage_identity = PipelineIdentityService(port=StandardIdentityAdapter())
+
+        peer_cfg = unified_cfg.get("stage_02_peer_resolution", {})
+        trusted_proxies = peer_cfg.get("trusted_proxies", self.policy.server.trusted_proxies)
         self.stage_peer = PipelinePeerResolutionService(
-            config_port=StandardPeerConfigAdapter(proxies=self.policy.server.trusted_proxies)
+            config_port=StandardPeerConfigAdapter(proxies=trusted_proxies)
         )
+
         self.stage_admission = PipelineGlobalAdmissionService(tracker=InMemoryAdmissionTrackerAdapter())
         self.stage_route = PipelineRouteResolutionService(catalog=InMemoryRouteCatalogAdapter(routes=routes))
         self.stage_limits = PipelineRouteLimitsService()
@@ -66,7 +79,9 @@ class ComposablePipelineService:
         self.stage_deadline = PipelineDeadlineService()
         self.stage_priority = PipelinePriorityAdmissionService()
         self.stage_ingress = PipelineHandlerIngressService(dispatcher=InMemoryDomainDispatcherAdapter())
-        self.max_global_concurrency = self.policy.limits.global_admission_limit
+
+        admission_cfg = unified_cfg.get("stage_03_global_admission", {})
+        self.max_global_concurrency = admission_cfg.get("max_concurrency", self.policy.limits.global_admission_limit)
         self.access_logs: List[AccessLogEntry] = []
 
     async def execute(self, req: IngressRequest) -> IngressResponse:
@@ -342,3 +357,40 @@ class ComposablePipelineService:
                     ctx.request_id,
                     ctx.trace_id,
                 )
+
+    async def asgi(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            return
+        headers = {k.decode("latin1").lower(): v.decode("latin1") for k, v in scope.get("headers", [])}
+        client = scope.get("client") or ("127.0.0.1", 0)
+        body_parts = []
+        more_body = True
+        while more_body:
+            message = await receive()
+            body_parts.append(message.get("body", b""))
+            more_body = message.get("more_body", False)
+        raw_body = b"".join(body_parts)
+        req = IngressRequest(
+            method=scope.get("method", "GET"),
+            path=scope.get("path", "/"),
+            headers=headers,
+            remote_addr=client[0],
+            body=raw_body,
+        )
+        res = await self.execute(req)
+        resp_headers = [(k.encode("latin1"), v.encode("latin1")) for k, v in res.headers.items()]
+        import json
+        if res.problem_details is not None:
+            body_bytes = res.problem_details.model_dump_json().encode("utf-8")
+            resp_headers.append((b"content-type", b"application/problem+json"))
+        elif isinstance(res.body, (dict, list)):
+            body_bytes = json.dumps(res.body).encode("utf-8")
+            resp_headers.append((b"content-type", b"application/json"))
+        elif isinstance(res.body, str):
+            body_bytes = res.body.encode("utf-8")
+        elif isinstance(res.body, bytes):
+            body_bytes = res.body
+        else:
+            body_bytes = b""
+        await send({"type": "http.response.start", "status": res.status_code, "headers": resp_headers})
+        await send({"type": "http.response.body", "body": body_bytes})

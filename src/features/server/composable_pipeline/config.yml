@@ -1,5 +1,87 @@
-feature: composable_pipeline
-execution_mode: strict_12_stage_linear
-problem_details_type_base: https://httpstatuses.io
-emit_access_log: true
-collect_metrics: true
+# Single Unified Configuration for the Composable Request Pipeline
+# All 12 Stages, Policies, Limits, Routes, Timeouts, and Quotas Declared in this Single YAML File
+
+pipeline:
+  name: composable_request_pipeline
+  version: "1.0.0"
+  emit_access_log: true
+  collect_metrics: true
+  problem_details_type_base: https://httpstatuses.io
+
+# Stage 1: Request Identity
+stage_01_identity:
+  request_id_header: x-request-id
+  traceparent_header: traceparent
+  allow_inbound_traceparent: false
+
+# Stage 2: Peer Resolution
+stage_02_peer_resolution:
+  trusted_proxies:
+    - "127.0.0.1/32"
+    - "10.0.0.0/8"
+    - "172.16.0.0/12"
+    - "192.168.0.0/16"
+
+# Stage 3: Global Admission (Little's Law Capacity)
+stage_03_global_admission:
+  max_concurrency: 1000
+  retry_after_seconds: 5
+
+# Stage 4: Route Resolution
+stage_04_route_resolution:
+  routes:
+    - path_template: "/api/v1/resource"
+      allowed_methods: ["GET", "POST"]
+      handler_name: "resource_handler"
+
+# Stage 5: Per-Route Limits
+stage_05_route_limits:
+  max_body_bytes: 10485760 # 10 MiB
+  allowed_content_types:
+    - application/json
+    - text/plain
+    - application/problem+json
+
+# Stage 6: Pre-Auth Rate Limiting (Keyed by Resolved Peer IP)
+stage_06_pre_auth_limit:
+  max_tokens: 100
+  refill_rate_per_sec: 10.0
+  retry_after_seconds: 5
+
+# Stage 7: Authentication (Headers-Only, Zero Body Read)
+stage_07_authentication:
+  scheme: Bearer
+  require_auth: true
+  clock_skew_tolerance_ms: 3000
+
+# Stage 8: Coarse Authorization (Scope Verification)
+stage_08_authorization:
+  default_required_scopes:
+    - read
+
+# Stage 9: Per-Identity Tenant Quota (Keyed by Principal/Tenant)
+stage_09_tenant_quota:
+  max_tokens: 500
+  refill_rate_per_sec: 50.0
+  retry_after_seconds: 3
+
+# Stage 10: Deadline Computation
+stage_10_deadline:
+  max_budget_ms: 10000.0
+  min_budget_ms: 10.0
+  safety_margin_ms: 50.0
+
+# Stage 11: Priority Admission (Load Shedding)
+stage_11_priority_admission:
+  shed_order:
+    - batch
+    - background
+    - interactive
+  batch_shed_load_ratio: 0.80
+  background_shed_load_ratio: 0.95
+  retry_after_seconds: 5
+
+# Stage 12: Handler Ingress & Dispatch
+stage_12_handler_ingress:
+  stream_chunk_bytes: 65536
+  expect_continue_support: true
