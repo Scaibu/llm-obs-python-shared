@@ -1,5 +1,5 @@
 import pytest
-from python_shared.http import (
+from src.features.http import (
     HTTP_CONSTANTS,
     ResilientHttpClient,
     httpClient,

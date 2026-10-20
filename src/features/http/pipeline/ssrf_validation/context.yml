@@ -1,0 +1,8 @@
+feature_name: ssrf_validation
+bounded_context: http_pipeline
+description: Pipeline step 3 - SSRF destination, scheme, and IP allowlist guard.
+ports:
+  - ssrf_validation.dns_port
+invariants:
+  - parsed url must include valid scheme and netloc
+  - parsed hostname must be in allowed_hosts if allowed_hosts is specified

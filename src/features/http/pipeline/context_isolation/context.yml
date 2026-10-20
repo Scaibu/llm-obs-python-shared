@@ -1,0 +1,8 @@
+feature_name: context_isolation
+bounded_context: http_pipeline
+description: Pipeline step 2 - Request context isolation and payload size guard.
+ports:
+  - context_isolation.context_port
+invariants:
+  - resolve or set default x-tenant-id header
+  - reject payload if size in bytes exceeds max_body_size_bytes

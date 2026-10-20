@@ -5,7 +5,7 @@ import threading
 from typing import Dict, List, Optional, Tuple
 import httpx
 
-from python_shared.http.constants import HTTP_CONSTANTS
+from src.features.http.constants import HTTP_CONSTANTS
 from python_shared.discovery.catalog.service_catalog import DEFAULT_SERVICE_CATALOG, resolve_service_endpoint
 from python_shared.discovery.models.service_models import ServiceInstanceModel, ResolveServiceData
 

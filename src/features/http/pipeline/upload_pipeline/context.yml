@@ -1,0 +1,12 @@
+feature_name: "upload_pipeline"
+description: "Hexagonal resilient object upload pipeline enforcing presigned direct-to-storage, version binding, quarantined inspection, and dual-write durability"
+architectural_invariants:
+  - "Direct-to-storage transfer mode; API server never buffers large uploads to node disk"
+  - "Pre-upload quota reservation at session creation time"
+  - "Server-generated opaque keys ({tenant_id}/{session_id}); clients never specify object storage paths"
+  - "Quarantined inspection isolated by specific object version_id and checksum before promotion"
+  - "Strict RFC 9110 / RFC 6266 serving headers and separate domain isolation on download"
+ports_required:
+  - "StoragePort (presign_post, get_metadata, copy_object, delete_object)"
+  - "MetadataRepositoryPort (create_session, update_state, get_session)"
+  - "QuotaPort (reserve_quota, release_quota)"

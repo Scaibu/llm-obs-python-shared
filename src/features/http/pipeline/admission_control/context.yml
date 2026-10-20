@@ -1,0 +1,8 @@
+feature_name: admission_control
+bounded_context: http_pipeline
+description: Pipeline step 1 - Concurrency admission control and fleet capacity guard.
+ports:
+  - admission_control.concurrency_port
+invariants:
+  - acquire concurrency slot before request execution
+  - fail with RuntimeError if fleet capacity is exceeded

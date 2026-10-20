@@ -1,0 +1,8 @@
+feature_name: singleflight
+bounded_context: http_pipeline
+description: Pipeline step 5 - SHA-256 concurrent request collapsing and deduplication.
+ports:
+  - singleflight.registry_port
+invariants:
+  - generate canonical sha-256 key from tenant, method, url, and serialized body
+  - check in-flight singleflights when method is GET and cancel_previous is false

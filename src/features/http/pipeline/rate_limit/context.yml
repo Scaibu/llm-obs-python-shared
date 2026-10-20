@@ -1,0 +1,9 @@
+feature_name: rate_limit
+bounded_context: http_pipeline
+description: Pipeline step 4 - Per-tenant token bucket outbound rate limiting and retry budget recording.
+ports:
+  - rate_limit.limiter_port
+  - rate_limit.retry_budget_port
+invariants:
+  - tenant must have available capacity in token bucket
+  - record request in fleet retry budget on admission

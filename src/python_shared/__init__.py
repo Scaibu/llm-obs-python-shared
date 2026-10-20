@@ -5,7 +5,9 @@ Modeled after packages/node/shared-infra.
 
 from python_shared.types import BaseResponse, HealthStatusResponse
 from python_shared.telemetry import setup_telemetry, get_tracer, REQUEST_COUNT, REQUEST_LATENCY
-from python_shared.http import ResilientHttpClient, CircuitBreaker, CorrelationAndTelemetryMiddleware
+from src.features.http.client import ResilientHttpClient
+from src.features.http.pipeline.resilience import CircuitBreaker
+from src.features.http.middleware import CorrelationAndTelemetryMiddleware
 from python_shared.db import get_redis_client, get_redis_pool, get_postgres_connection
 from python_shared.discovery import (
     resolve_service_endpoint,

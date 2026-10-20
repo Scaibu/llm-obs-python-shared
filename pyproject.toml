@@ -28,7 +28,10 @@ dev = [
 
 [tool.pytest.ini_options]
 pythonpath = [".", "src"]
-testpaths = ["tests", "src/features/validation/tests", "src/features/server"]
+testpaths = ["tests", "src/features/validation/tests", "src/features/server", "src/features/http"]
+addopts = "--import-mode=importlib"
+
+
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]

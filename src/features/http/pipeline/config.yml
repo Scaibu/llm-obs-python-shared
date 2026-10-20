@@ -1,0 +1,209 @@
+schema: https://config.example.internal/schemas/outbound-pipeline.json
+pipeline:
+  name: http_outbound_pipeline
+  limit_scope: per_replica
+  stage_order: fixed_in_code
+  # 1 target_resolution -> 2 ssrf_validation -> 3 context_binding -> 4 deadline
+  # -> 5 cache_eval -> 6 singleflight -> 7 circuit_breaker -> 8 rate_limit -> 9 bulkhead
+
+context:
+  tenant_source: authenticated_principal
+  strip_inbound_headers:
+    - x-tenant-id
+  on_missing_tenant: reject
+  service_principals_allowed: true
+
+deadline:
+  source: inbound_remaining_budget
+  safety_margin_seconds: 0.05
+  on_unviable: fail_fast
+
+target_classes:
+  declared_upstream:
+    ssrf_validation: false
+    allowed_schemes:
+      - https
+      - http
+  user_supplied_url:
+    ssrf_validation: true
+    allowed_schemes:
+      - https
+    allowed_ports:
+      - 443
+    host_policy:
+      mode: denylist
+      hosts: []
+    redirects:
+      follow: false
+    validate_at: dial
+    blocked_ip_ranges:
+      - "0.0.0.0/8"
+      - "10.0.0.0/8"
+      - "100.64.0.0/10"
+      - "127.0.0.0/8"
+      - "169.254.0.0/16"
+      - "172.16.0.0/12"
+      - "192.0.0.0/24"
+      - "192.168.0.0/16"
+      - "198.18.0.0/15"
+      - "224.0.0.0/4"
+      - "240.0.0.0/4"
+      - "::/128"
+      - "::1/128"
+      - "::ffff:0:0/96"
+      - "64:ff9b::/96"
+      - "2002::/16"
+      - "fc00::/7"
+      - "fe80::/10"
+      - "ff00::/8"
+    response_limits:
+      max_header_bytes: 32768
+      max_body_bytes: 1048576
+      max_decompressed_bytes: 4194304
+      max_compression_ratio: 20
+
+header_policy:
+  strip_hop_by_hop: true
+  drop_inbound:
+    - authorization
+    - cookie
+    - x-forwarded-for
+    - x-request-id-internal
+  propagate_traceparent_to: declared_upstream_only
+
+upstreams:
+  default:
+    target_class: declared_upstream
+    tls:
+      verify: true
+      min_version: TLS1.2
+    timeouts:
+      connect_seconds: 0.2
+      tls_handshake_seconds: 0.3
+      response_headers_seconds: 2.0
+      max_total_seconds: 5.0
+    bulkhead:
+      max_in_flight: 100
+    rate_limit:
+      rate_count: 100
+      rate_period_seconds: 1.0
+      burst: 100
+    circuit_breaker:
+      window_seconds: 10.0
+      min_requests: 20
+      failure_rate_threshold: 0.5
+      open_duration_base_seconds: 5.0
+      open_duration_max_seconds: 60.0
+      half_open_probes: 3
+      half_open_successes_to_close: 3
+    cache:
+      enabled: true
+      respect_cache_control: true
+      authenticated_responses: per_principal
+      default_ttl_seconds: 300.0
+      ttl_jitter_ratio: 0.1
+      stale_if_error_seconds: 600.0
+      max_entries: 10000
+      max_bytes: 104857600
+    singleflight:
+      enabled: true
+      methods:
+        - GET
+        - HEAD
+
+security:
+  input_hardening:
+    reject_crlf_headers: true
+    strict_ijson: true
+    max_json_depth: 20
+    max_json_keys: 1000
+    max_string_length: 65536
+  identity_lifecycle:
+    api_key_prefix: "live_sk_"
+    min_key_bytes: 32
+    constant_time_comparison: true
+  threat_model:
+    framework: STRIDE
+    verification_standard: OWASP_ASVS_LEVEL_2
+
+uploads:
+  mode: direct_to_storage
+  proxied_max_bytes: 1048576
+  session:
+    key_generation: server_opaque
+    expiry_seconds: 900
+    max_open_per_tenant: 20
+    quota_reservation: at_session_create
+  presign:
+    method: post_policy
+    expiry_seconds: 600
+    pin_content_type: true
+    require_checksum: sha256
+  completion:
+    verify:
+      - exists
+      - size
+      - checksum
+    bind_to: version_id
+    close_session: true
+  quarantine:
+    location: separate_bucket
+    client_read: forbidden
+    max_age_days: 7
+  inspection:
+    sniff_magic_bytes: true
+    malware_scan: required
+    image:
+      max_width: 16384
+      max_height: 16384
+      max_pixels: 100000000
+      max_frames: 300
+      reencode: true
+      strip_metadata: true
+    svg:
+      mode: rasterize
+    xml:
+      dtd: disabled
+      external_entities: disabled
+    archive:
+      max_entries: 10000
+      max_total_bytes: 1073741824
+      max_depth: 2
+      reject_symlinks: true
+      reject_path_escape: true
+    filename:
+      normalize: NFC
+      strip_bidi_controls: true
+      strip_control_chars: true
+      max_length: 255
+  promote:
+    method: copy_to_immutable_key
+  multipart:
+    abort_incomplete_after_days: 1
+    verify_part_checksums: true
+    verify_assembled_checksum: true
+
+downloads:
+  authorization: per_object_every_request
+  serving_domain: usercontent.example.net
+  headers:
+    content_type: from_inspection
+    nosniff: true
+    disposition_default: attachment
+    inline_allowlist:
+      - image/png
+      - image/jpeg
+      - image/webp
+      - application/pdf
+    csp_for_inline: "sandbox"
+    content_digest: sha-256
+  ranges:
+    max_ranges: 1
+    reject_overlapping: true
+    strong_etag: true
+  presign:
+    expiry_seconds: 300
+    bind_to: version_id
+    fixed_response_headers: true
+  egress_quota:
+    per_tenant_bytes_per_day: 107374182400

@@ -1,0 +1,8 @@
+feature_name: cache_eval
+bounded_context: http_pipeline
+description: Pipeline step 6 - Tenant partitioned LRU cache lookup and mutation invalidation.
+ports:
+  - cache_eval.cache_store_port
+invariants:
+  - mutating methods (POST, PUT, PATCH, DELETE) clear tenant cache store
+  - GET requests without no_cache flag return cached response if hit

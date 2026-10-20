@@ -1,0 +1,17 @@
+feature: ssrf_validation
+stage: 1
+target_classes:
+  declared_upstream:
+    ssrf_validation: false
+    allowed_schemes:
+      - https
+      - http
+  user_supplied_url:
+    ssrf_validation: true
+    allowed_schemes:
+      - https
+    allowed_ports:
+      - 443
+    redirects:
+      follow: false
+    validate_at: dial

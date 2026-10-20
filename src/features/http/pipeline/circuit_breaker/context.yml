@@ -1,0 +1,8 @@
+feature_name: circuit_breaker
+bounded_context: http_pipeline
+description: Pipeline step 7 - Bounded LRU circuit breaker state verification.
+ports:
+  - circuit_breaker.state_port
+invariants:
+  - compute circuit key from tenant_id and route_template
+  - reject with RuntimeError if circuit breaker cannot execute (OPEN/HALF_OPEN threshold)

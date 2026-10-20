@@ -8,7 +8,7 @@ import threading
 from typing import Dict, Optional, Any
 import httpx
 
-from python_shared.http.constants import HTTP_CONSTANTS
+from src.features.http.constants import HTTP_CONSTANTS
 from python_shared.discovery.catalog.service_catalog import SERVICE_CATALOG_META
 from python_shared.discovery.models.service_models import (
     RegisterInstanceRequest,
