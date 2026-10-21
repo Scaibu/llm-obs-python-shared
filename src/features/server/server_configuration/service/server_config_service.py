@@ -18,3 +18,18 @@ class ServerConfigurationService:
         if errors:
             raise ValueError(f"Configuration validation failed with {len(errors)} errors: " + "; ".join(errors))
         return snapshot
+
+    @classmethod
+    def from_file(cls, config_path: str) -> "ServerConfigurationService":
+        import yaml
+        from pathlib import Path
+        from src.features.server.server_configuration.infrastructure.adapters.server_config_adapter import (
+            StandardServerConfigAdapter,
+        )
+        p = Path(config_path)
+        if p.is_dir():
+            p = p / "server-config.yml"
+        with open(p, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        return cls(StandardServerConfigAdapter(data))
+

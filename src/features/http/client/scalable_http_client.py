@@ -1,5 +1,6 @@
 import asyncio
 import httpx
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from src.features.http.pipeline.types import PipelineContext, RequestConfig
@@ -20,7 +21,22 @@ class PipelineHttpClient:
         tenant_id: Optional[str] = None,
         principal_id: Optional[str] = None,
         target_class: str = "declared_upstream",
+        config_path: Optional[Union[str, Path]] = None,
     ) -> None:
+        if config_path is not None:
+            p = Path(config_path)
+            if p.is_dir():
+                p = p / "http-config.yml"
+            if p.exists():
+                import yaml
+                with open(p, "r", encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+                if profile == "default" and "profile" in cfg:
+                    profile = cfg["profile"]
+                if "client" in cfg and "timeout_seconds" in cfg["client"]:
+                    timeout = float(cfg["client"]["timeout_seconds"])
+                if steps is None and "pipeline" in cfg and "steps" in cfg["pipeline"]:
+                    steps = cfg["pipeline"]["steps"]
         self.base_url: str = base_url.rstrip("/")
         self.timeout: float = timeout
         self.profile: str = profile
@@ -37,6 +53,11 @@ class PipelineHttpClient:
         self.default_target_class: str = target_class
         self._sync_client: Optional[httpx.Client] = None
         self._async_client: Optional[httpx.AsyncClient] = None
+
+    @classmethod
+    def from_config(cls, config_path: Union[str, Path], **kwargs: Any) -> "PipelineHttpClient":
+        return cls(config_path=config_path, **kwargs)
+
 
     def _resolve_url(self, path_or_url: str) -> str:
         if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
