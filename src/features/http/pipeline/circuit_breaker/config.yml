@@ -1,5 +1,0 @@
-feature: circuit_breaker
-stage: 5
-failure_threshold: 5
-cooldown_ms: 5000.0
-max_entries: 1000

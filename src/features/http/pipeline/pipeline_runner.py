@@ -1,15 +1,3 @@
-"""
-Blueprint:
-- Composable HTTP pipeline runner coordinating modular pipeline step features.
-- Implements strict Part B execution order:
-  1. SSRF Validation (user URLs only)
-  2. Context Binding (strips untrusted headers, binds authenticated tenant & principal)
-  3. Cache Evaluation (lookup hit short-circuits execution before consuming tokens/slots)
-  4. Singleflight (deduplication of in-flight misses across concurrent requests)
-  5. Circuit Breaker (open state fast-fails before rate-limiting or bulkheads)
-  6. Rate Limit (per-tenant / per-upstream token bucket)
-  7. Bulkhead / Admission Control (isolated concurrency slot acquisition)
-"""
 import os
 import yaml
 from typing import Any, Dict, List, Optional
@@ -29,10 +17,8 @@ class StepInputHardening:
     async def execute(self, ctx: Any) -> None:
         from src.features.http.pipeline.security.input_hardening import InputHardeningRules
         ctx.step_index += 1
-        # 1. Enforce CRLF rejection in outbound headers
         if ctx.config.headers:
             InputHardeningRules.reject_crlf_in_headers(ctx.config.headers)
-        # 2. If body is a JSON string, validate strict I-JSON rules
         if isinstance(ctx.config.body, str) and (ctx.config.body.strip().startswith("{") or ctx.config.body.strip().startswith("[")):
             InputHardeningRules.parse_strict_ijson(ctx.config.body)
 
@@ -56,8 +42,6 @@ class HttpPipelineRunner:
         return {}
 
     def _build_default_steps(self) -> List[Any]:
-        # Strict Execution order:
-        # InputHardening -> SSRF -> Context -> Cache -> Singleflight -> CircuitBreaker -> RateLimit -> Bulkhead
         return [
             StepInputHardening(),
             StepSsrfValidation(),
@@ -89,7 +73,6 @@ class HttpPipelineRunner:
                 if isinstance(step, StepAdmissionControl):
                     admitted = True
                 if ctx.cached_response is not None:
-                    # Cache hit: immediate short-circuit without consuming rate limits or slots
                     break
             return ctx
         finally:
@@ -102,3 +85,4 @@ __all__ = [
     "HttpPipelineRunner",
     "pipeline_runner",
 ]
+

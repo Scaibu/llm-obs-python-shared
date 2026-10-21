@@ -1,7 +1,0 @@
-feature: rate_limit
-stage: 6
-default_rate_limit: 100
-token_bucket_capacity: 100
-burst: 100
-rate_period_seconds: 1.0
-retry_budget_enabled: true

@@ -1,9 +1,0 @@
-feature: context_isolation
-stage: 2
-tenant_source: authenticated_principal
-strip_inbound_headers:
-  - x-tenant-id
-on_missing_tenant: reject
-service_principals_allowed: true
-max_body_size_bytes: 10485760
-header_tenant_id: x-tenant-id

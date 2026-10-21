@@ -1,4 +1,0 @@
-feature: admission_control
-stage: 7
-max_concurrency: 100
-rejection_metric_reason: fleet_capacity_exceeded
