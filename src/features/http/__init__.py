@@ -25,6 +25,7 @@ from src.features.http.pipeline import (
     StepCacheEval,
     StepCircuitBreaker,
     HttpPipelineRunner,
+    get_pipeline_runner,
     pipeline_runner,
 )
 from src.features.http.middleware import CorrelationAndTelemetryMiddleware
@@ -59,6 +60,7 @@ __all__ = [
     "StepCacheEval",
     "StepCircuitBreaker",
     "HttpPipelineRunner",
+    "get_pipeline_runner",
     "pipeline_runner",
     "CorrelationAndTelemetryMiddleware",
     "extract_or_generate_correlation_id",

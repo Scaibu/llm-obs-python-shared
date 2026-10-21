@@ -2,9 +2,31 @@ schema: https://config.example.internal/schemas/outbound-pipeline.json
 pipeline:
   name: http_outbound_pipeline
   limit_scope: per_replica
-  stage_order: fixed_in_code
-  # 1 target_resolution -> 2 ssrf_validation -> 3 context_binding -> 4 deadline
-  # -> 5 cache_eval -> 6 singleflight -> 7 circuit_breaker -> 8 rate_limit -> 9 bulkhead
+  stage_order: configurable_by_profile
+
+profiles:
+  api_service:
+    description: "Full 8-step protection for high-concurrency API services"
+    steps:
+      - input_hardening
+      - ssrf_validation
+      - context_isolation
+      - cache_eval
+      - singleflight
+      - circuit_breaker
+      - rate_limit
+      - admission_control
+  temporal_worker:
+    description: "Composable profile for Temporal activities and background workers"
+    steps:
+      - context_isolation
+      - circuit_breaker
+  internal_fast:
+    description: "Minimal overhead for trusted internal service calls"
+    steps:
+      - context_isolation
+  default: api_service
+
 
 context:
   tenant_source: authenticated_principal

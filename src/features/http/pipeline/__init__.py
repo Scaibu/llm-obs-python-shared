@@ -1,7 +1,3 @@
-"""
-Blueprint:
-- Package exports for features/http/pipeline.
-"""
 from src.features.http.pipeline.types import RequestConfig, PipelineContext, PipelineStep
 from src.features.http.pipeline.security.input_hardening import StepInputHardening
 from src.features.http.pipeline.ssrf_validation import StepSsrfValidation
@@ -11,7 +7,11 @@ from src.features.http.pipeline.singleflight import StepSingleflight
 from src.features.http.pipeline.circuit_breaker import StepCircuitBreaker
 from src.features.http.pipeline.rate_limit import StepRateLimit
 from src.features.http.pipeline.admission_control import StepAdmissionControl
-from src.features.http.pipeline.pipeline_runner import HttpPipelineRunner, pipeline_runner
+from src.features.http.pipeline.pipeline_runner import (
+    HttpPipelineRunner,
+    get_pipeline_runner,
+    pipeline_runner,
+)
 
 __all__ = [
     "RequestConfig",
@@ -26,5 +26,6 @@ __all__ = [
     "StepRateLimit",
     "StepAdmissionControl",
     "HttpPipelineRunner",
+    "get_pipeline_runner",
     "pipeline_runner",
 ]

@@ -1,23 +1,13 @@
-"""
-Blueprint:
-- Production Resilient HTTP Client powered directly by the unified HttpPipelineRunner.
-- Uses the single configuration (`src/features/http/pipeline/config.yml`).
-- Every call flows through all 7 pipeline steps with full OpenTelemetry deep tracing:
-  1. SSRF Validation (hostname/IP verification)
-  2. Context Isolation (tenant verification & outbound header binding)
-  3. Cache Evaluation (instant short-circuit on cache hits)
-  4. Singleflight (request deduplication)
-  5. Circuit Breaker (fast-fail on open circuit)
-  6. Rate Limit (token bucket rate checking)
-  7. Bulkhead / Admission Control (concurrency slot management)
-- Supports both synchronous and asynchronous production API calls with automatic session cleanup.
-"""
 import asyncio
 import httpx
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from src.features.http.pipeline.types import PipelineContext, RequestConfig
-from src.features.http.pipeline.pipeline_runner import HttpPipelineRunner, pipeline_runner
+from src.features.http.pipeline.pipeline_runner import (
+    HttpPipelineRunner,
+    get_pipeline_runner,
+    pipeline_runner,
+)
 
 class PipelineHttpClient:
     def __init__(
@@ -25,16 +15,26 @@ class PipelineHttpClient:
         base_url: str = "",
         timeout: float = 10.0,
         runner: Optional[HttpPipelineRunner] = None,
+        profile: str = "default",
+        steps: Optional[List[Any]] = None,
         tenant_id: Optional[str] = None,
         principal_id: Optional[str] = None,
         target_class: str = "declared_upstream",
     ) -> None:
-        self.base_url = base_url.rstrip("/")
-        self.timeout = timeout
-        self.runner = runner or pipeline_runner
-        self.default_tenant_id = tenant_id or "default"
-        self.default_principal_id = principal_id or "anonymous"
-        self.default_target_class = target_class
+        self.base_url: str = base_url.rstrip("/")
+        self.timeout: float = timeout
+        self.profile: str = profile
+        if runner is not None:
+            self.runner: HttpPipelineRunner = runner
+        elif steps is not None:
+            self.runner = HttpPipelineRunner(steps=steps)
+        elif profile != "default":
+            self.runner = get_pipeline_runner(profile=profile)
+        else:
+            self.runner = pipeline_runner
+        self.default_tenant_id: str = tenant_id or "default"
+        self.default_principal_id: str = principal_id or "anonymous"
+        self.default_target_class: str = target_class
         self._sync_client: Optional[httpx.Client] = None
         self._async_client: Optional[httpx.AsyncClient] = None
 
@@ -257,7 +257,6 @@ class PipelineHttpClient:
             except RuntimeError:
                 asyncio.run(self._async_client.aclose())
 
-# Canonical single client instance
 ResilientHttpClient = PipelineHttpClient
 httpClient = PipelineHttpClient()
 
