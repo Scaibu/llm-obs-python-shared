@@ -54,7 +54,7 @@ flowchart TD
     end
 
     subgraph PipelineEngine["3. Composable HTTP Pipeline Engine (python-shared)"]
-        Adapter -->|execute_async()| ClientFactory
+        Adapter -->|"execute_async()"| ClientFactory
         ClientFactory --> ClientInstance[ResilientHttpClient]
         ClientInstance --> PipelineRunner[HttpPipelineRunner]
         

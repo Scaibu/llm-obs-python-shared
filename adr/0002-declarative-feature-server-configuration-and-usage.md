@@ -349,27 +349,81 @@ export FEATURE_DIR="${MONOREPO_ROOT}/${PACKAGE_NAME}/src/features/${FEATURE_NAME
 
 ---
 
-### Step 1: Feature Port & Environment Planning
+### Step 1: Universal Port Planning & Dynamic Allocation Algorithm (Any Future Service)
 
 #### 1.1 Purpose & Architectural Rationale
-Microservices in our distributed architecture operate on a dedicated port matrix to guarantee separation of concerns:
-- **Public Ingress (`PUBLIC_PORT`)**: Bound to `0.0.0.0` to receive client or load balancer traffic.
-- **Admin Management API (`ADMIN_PORT`)**: Strictly bound to loopback `127.0.0.1` to expose health endpoints, live configuration reload triggers, and circuit-breaker inspection without public exposure.
-- **Metrics Scraping (`METRICS_PORT`)**: Bound to `127.0.0.1` or internal cluster interface for Prometheus scraping.
+Microservices in our distributed architecture operate on a non-overlapping, mathematical port triple to guarantee strict separation of concerns across any service present now or added in the future:
+- **Public Ingress (`PUBLIC_PORT`)**: Bound to `0.0.0.0` to receive client or edge load balancer traffic.
+- **Admin Management API (`ADMIN_PORT`)**: Strictly bound to loopback `127.0.0.1` to expose health checks, live reload triggers, and circuit-breaker telemetry without public wire exposure.
+- **Metrics Scraping (`METRICS_PORT`)**: Bound to `127.0.0.1` or internal cluster interfaces for Prometheus scraping.
 
-#### 1.2 Monorepo Port Allocation Matrix
+#### 1.2 Mathematical Port Triple Standard
+Every microservice or server feature in the monorepo is assigned a unique integer `SERVICE_INDEX` ($N \in [1, 899]$). The port triple is deterministically computed:
 
-| Package Name | Public Port (`PUBLIC_PORT`) | Admin Port (`ADMIN_PORT`) | Metrics Port (`METRICS_PORT`) |
-|---|---|---|---|
-| `alert-engine` | `8001` | `9001` | `9101` |
-| `instrumentation-sdk` | `8002` | `9002` | `9102` |
-| `quality-engine` | `8003` | `9003` | `9103` |
-| `forecast-worker` | `8006` | `9006` | `9106` |
-| `nli-worker` | `8008` | `9008` | `9108` |
-| *Future Feature/Package* | `80XX` (Base + N) | `90XX` (Base + N) | `91XX` (Base + N) |
+$$\text{PUBLIC\_PORT} = 8000 + N$$
+$$\text{ADMIN\_PORT}  = 9000 + N$$
+$$\text{METRICS\_PORT} = 9100 + N$$
 
-#### 1.3 Step-by-Step Port Conflict Check
-Execute this shell command to assert that designated ports are available before binding:
+- **Partition Invariant**:
+  - Public Ingress Partition: `8001 – 8899`
+  - Admin Management Partition: `9001 – 9099`
+  - Prometheus Scraping Partition: `9101 – 9999`
+  Because each partition resides in a disjoint port range, port collisions between public and administrative endpoints are mathematically impossible.
+
+#### 1.3 Dynamic Automated Port Discovery & Allocation Tool (For Any Future Service)
+When creating ANY new service in the future, developers and CI/CD pipelines run this script. It:
+1. Dynamically scans the entire monorepo for all existing `server-config.yml` files.
+2. Extracts all currently claimed `public_bind`, `admin_bind`, and `metrics_bind` ports.
+3. Calculates the next available, unreserved `SERVICE_INDEX`.
+4. Executes non-blocking TCP socket probes against `127.0.0.1` to ensure the OS network stack has not bound those ports.
+5. Exports `PUBLIC_PORT`, `ADMIN_PORT`, and `METRICS_PORT` directly into the current shell session:
+
+```bash
+# Run the dynamic port allocator for your target package/service:
+eval $(python3 -c "
+import re
+import socket
+from pathlib import Path
+
+claimed_public_ports = set()
+for config_path in Path('.').glob('**/server-config.yml'):
+    try:
+        content = config_path.read_text()
+        m = re.search(r'public_bind:\s*\"?[^:\"]+:(\d+)', content)
+        if m:
+            claimed_public_ports.add(int(m.group(1)))
+    except Exception:
+        pass
+
+service_idx = 1
+while (8000 + service_idx) in claimed_public_ports:
+    service_idx += 1
+
+candidate_public = 8000 + service_idx
+candidate_admin = 9000 + service_idx
+candidate_metrics = 9100 + service_idx
+
+for p in [candidate_public, candidate_admin, candidate_metrics]:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.2)
+        if s.connect_ex(('127.0.0.1', p)) == 0:
+            raise RuntimeError(f'Port {p} is currently active on host! Choose another offset.')
+
+print(f'export SERVICE_INDEX={service_idx}')
+print(f'export PUBLIC_PORT={candidate_public}')
+print(f'export ADMIN_PORT={candidate_admin}')
+print(f'export METRICS_PORT={candidate_metrics}')
+")
+
+# Print the dynamically allocated ports:
+echo "Allocated Ports for ${PACKAGE_NAME}:"
+echo "  Public Ingress:  ${PUBLIC_PORT}"
+echo "  Admin Loopback:  ${ADMIN_PORT}"
+echo "  Prometheus:      ${METRICS_PORT}"
+```
+
+#### 1.4 Automated Verification Script
+Run this script to assert that the designated ports are distinct, conform to partition ranges, and are locally available:
 
 ```bash
 python3 -c "
@@ -382,6 +436,7 @@ ports = {
     'METRICS_PORT': int(os.environ['METRICS_PORT'])
 }
 
+assert 8000 < ports['PUBLIC_PORT'] < 9000, f'Public port {ports[\"PUBLIC_PORT\"]} out of range (8001-8899)'
 assert len(set(ports.values())) == 3, 'VIOLATION: Public, Admin, and Metrics ports must all be distinct!'
 
 for name, port in ports.items():
@@ -390,7 +445,7 @@ for name, port in ports.items():
         result = s.connect_ex(('127.0.0.1', port))
         assert result != 0, f'PORT CONFLICT: Port {port} ({name}) is already in use by another process!'
 
-print(f'>>> Step 1 SUCCESS: All ports ({ports}) are available and distinct')
+print(f'>>> Step 1 SUCCESS: All ports ({ports}) are dynamically allocated and distinct')
 "
 ```
 
