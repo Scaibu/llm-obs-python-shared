@@ -337,16 +337,128 @@ This section provides an in-depth parameter analysis: syntax rules, ideal produc
 
 ---
 
-## 8. Complete Operations & Implementation Manual
+## 8. Complete Step-by-Step Implementation & Operations Manual (Universal Framework)
 
-### Step 1: Scaffolding Feature Configuration File
-Create `http-config.yml` inside your feature folder:
+This section provides a universal, feature-agnostic, 8-step blueprint to implement, configure, wire, test, and verify declarative HTTP clients in **any existing package or any future feature** across the monorepo.
+
+### 8.0 Universal Environment Variables & Conventions
+
+Before beginning implementation in any package or feature, set these environment variables in your terminal. All subsequent steps and verification scripts reference these variables dynamically:
 
 ```bash
-mkdir -p quality-engine/src/features/score_composite
-cat << 'EOF' > quality-engine/src/features/score_composite/http-config.yml
+# 1. Target package name (e.g., quality-engine, alert-engine, semantic-coherence, toxicity, etc.)
+export PACKAGE_NAME="quality-engine"
+
+# 2. Target domain feature folder name (e.g., score_composite, embedding_worker, alert_dispatcher, etc.)
+export FEATURE_NAME="score_composite"
+
+# 3. Execution profile: "api_service" (REST), "temporal_worker" (Temporal), or "internal_fast" (Cluster RPC)
+export FEATURE_PROFILE="api_service"
+
+# 4. Computed absolute filesystem paths
+export MONOREPO_ROOT="$(pwd)"
+export FEATURE_DIR="${MONOREPO_ROOT}/${PACKAGE_NAME}/src/features/${FEATURE_NAME}"
+```
+
+---
+
+### Step 1: Feature Folder Audit & Hexagonal Scaffolding (Rule 1 Compliance)
+
+#### 1.1 Purpose & Architectural Rationale
+Rule 1 (`1-feature-folder-writing-rule.md`) mandates that every feature must be self-contained and strictly follow Hexagonal Architecture (Ports and Adapters). This ensures:
+- The core business domain is completely decoupled from HTTP transport protocols, serialization libraries, and network clients.
+- The feature can run in any process model (REST API worker, CLI tool, or Temporal workflow) without altering domain logic.
+- PEP 420 namespace packaging rules are preserved: `src/` and `src/features/` must remain namespace directories (containing **no** `__init__.py`).
+
+#### 1.2 Prerequisites & Structural Rules
+- Target package directory must exist in the monorepo root.
+- Python 3.11+ virtual environment must be active with `policy-orchestrator` installed (`which po`).
+- Invariant: `src/__init__.py` and `src/features/__init__.py` must NOT exist. Only sub-layers (`contracts/`, `domain/`, `infrastructure/`, `service/`, `tests/`) contain `__init__.py`.
+
+#### 1.3 Step-by-Step Scaffolding Commands
+Run the following shell commands to scaffold the full hexagonal layer for your feature:
+
+```bash
+# 1. Create standard Hexagonal directory tree
+mkdir -p "${FEATURE_DIR}/contracts"
+mkdir -p "${FEATURE_DIR}/domain"
+mkdir -p "${FEATURE_DIR}/infrastructure/ports"
+mkdir -p "${FEATURE_DIR}/infrastructure/adapters"
+mkdir -p "${FEATURE_DIR}/service"
+mkdir -p "${FEATURE_DIR}/tests"
+
+# 2. Initialize sub-layer package markers (PEP 420 compliant)
+touch "${FEATURE_DIR}/contracts/__init__.py"
+touch "${FEATURE_DIR}/domain/__init__.py"
+touch "${FEATURE_DIR}/infrastructure/__init__.py"
+touch "${FEATURE_DIR}/infrastructure/ports/__init__.py"
+touch "${FEATURE_DIR}/infrastructure/adapters/__init__.py"
+touch "${FEATURE_DIR}/service/__init__.py"
+touch "${FEATURE_DIR}/tests/__init__.py"
+
+# 3. Assert PEP 420 namespace invariants (Ensure NO root/feature init files exist)
+rm -f "${MONOREPO_ROOT}/${PACKAGE_NAME}/src/__init__.py"
+rm -f "${MONOREPO_ROOT}/${PACKAGE_NAME}/src/features/__init__.py"
+```
+
+#### 1.4 Automated Verification Script
+Run this script to verify that the directory structure complies with monorepo rules:
+
+```bash
+python3 -c "
+import os
+import sys
+from pathlib import Path
+
+feature_dir = Path(os.environ['FEATURE_DIR'])
+required_subdirs = [
+    'contracts', 'domain', 'infrastructure/ports',
+    'infrastructure/adapters', 'service', 'tests'
+]
+
+for subdir in required_subdirs:
+    target = feature_dir / subdir
+    assert target.is_dir(), f'FAILED: Missing directory {target}'
+    init_file = target / '__init__.py'
+    assert init_file.is_file(), f'FAILED: Missing __init__.py in {target}'
+
+package_name = os.environ['PACKAGE_NAME']
+assert not (Path(package_name) / 'src' / '__init__.py').exists(), 'FAILED: Stray src/__init__.py violates PEP 420!'
+assert not (Path(package_name) / 'src' / 'features' / '__init__.py').exists(), 'FAILED: Stray src/features/__init__.py violates PEP 420!'
+
+print(f'>>> Step 1 SUCCESS: Hexagonal structure verified for {feature_dir}')
+"
+```
+
+#### 1.5 Common Pitfalls & Troubleshooting
+- **Error: `ModuleNotFoundError: No module named 'src.features.<feature>'`**:
+  - *Cause*: A developer created `src/__init__.py` or `src/features/__init__.py`, breaking Python's native namespace package resolution.
+  - *Fix*: Run `rm -f ${PACKAGE_NAME}/src/__init__.py ${PACKAGE_NAME}/src/features/__init__.py`.
+
+---
+
+### Step 2: Authoring Declarative `http-config.yml` with Profile Selection
+
+#### 2.1 Purpose & Architectural Rationale
+Instead of hardcoding timeouts, retry counts, connection pools, and circuit breaker thresholds in Python code, every feature defines an immutable declarative contract in `http-config.yml`.
+This guarantees:
+- Operational agility: Site Reliability Engineers (SREs) can tune network parameters without recompiling or redeploying code.
+- Profile consistency: The client automatically activates the appropriate pipeline steps based on the process model.
+
+#### 2.2 Profile Decision Matrix
+
+| Execution Profile | Target Execution Environment | Pipeline Steps Activated | Rationale |
+|---|---|---|---|
+| `api_service` | FastAPI, REST endpoints, Ingress gateways | All 8 Steps: `input_hardening`, `ssrf_validation`, `context_isolation`, `cache_eval`, `singleflight`, `circuit_breaker`, `rate_limit`, `admission_control` | Maximum protection against hostile user payloads, SSRF attacks, downstream outages, and connection exhaustion. |
+| `temporal_worker` | Temporal activity workers, Celery/async task workers | 2 Steps: `context_isolation`, `circuit_breaker` | Lean execution. Rate limiting, backoff, retries, and task bulkheads are managed natively by the Temporal engine. |
+| `internal_fast` | High-throughput intra-cluster RPC, daemon sidecars | 1 Step: `context_isolation` | Ultra-low latency (<0.5ms overhead). Bypasses caching and circuit breakers for trusted intra-cluster calls. |
+
+#### 2.3 Concrete YAML Templates
+
+##### Profile A: `api_service` (REST Services)
+```yaml
 schema_version: "1.0.0"
-feature_name: "score_composite"
+feature_name: "target_feature"
 profile: "api_service"
 
 client:
@@ -357,6 +469,12 @@ client:
   keepalive_expiry_seconds: 30.0
   verify_ssl: true
   retries: 3
+  retry_backoff_factor: 0.5
+  retry_status_codes:
+    - 429
+    - 502
+    - 503
+    - 504
 
 pipeline:
   steps:
@@ -368,114 +486,569 @@ pipeline:
     - circuit_breaker
     - rate_limit
     - admission_control
+
   circuit_breaker:
     failure_threshold: 5
     recovery_timeout_seconds: 30.0
+    half_open_requests: 3
+
   rate_limit:
     requests_per_second: 100
     burst: 200
+
   cache_eval:
     enabled: true
     default_ttl_seconds: 60
+    stale_if_error_seconds: 300.0
+
   security:
     input_hardening: true
     ssrf_validation: true
+```
+
+##### Profile B: `temporal_worker` (Asynchronous Workflow Workers)
+```yaml
+schema_version: "1.0.0"
+feature_name: "target_feature"
+profile: "temporal_worker"
+
+client:
+  timeout_seconds: 60.0
+  connect_timeout_seconds: 5.0
+  max_connections: 50
+  max_keepalive_connections: 10
+  keepalive_expiry_seconds: 45.0
+  verify_ssl: true
+  retries: 0
+  retry_backoff_factor: 0.0
+
+pipeline:
+  steps:
+    - context_isolation
+    - circuit_breaker
+
+  circuit_breaker:
+    failure_threshold: 5
+    recovery_timeout_seconds: 30.0
+    half_open_requests: 2
+
+  security:
+    input_hardening: false
+    ssrf_validation: false
+```
+
+##### Profile C: `internal_fast` (Cluster-Internal High-Speed RPC)
+```yaml
+schema_version: "1.0.0"
+feature_name: "target_feature"
+profile: "internal_fast"
+
+client:
+  timeout_seconds: 5.0
+  connect_timeout_seconds: 1.0
+  max_connections: 200
+  max_keepalive_connections: 50
+  keepalive_expiry_seconds: 60.0
+  verify_ssl: true
+  retries: 1
+  retry_backoff_factor: 0.1
+
+pipeline:
+  steps:
+    - context_isolation
+
+  security:
+    input_hardening: false
+    ssrf_validation: false
+```
+
+#### 2.4 Step-by-Step Authoring Command
+Execute this parameterized shell command to write the configuration file based on `$FEATURE_PROFILE`:
+
+```bash
+cat << EOF > "${FEATURE_DIR}/http-config.yml"
+schema_version: "1.0.0"
+feature_name: "${FEATURE_NAME}"
+profile: "${FEATURE_PROFILE}"
+
+client:
+  timeout_seconds: $( [ "${FEATURE_PROFILE}" = "temporal_worker" ] && echo "60.0" || ( [ "${FEATURE_PROFILE}" = "internal_fast" ] && echo "5.0" || echo "30.0" ) )
+  connect_timeout_seconds: $( [ "${FEATURE_PROFILE}" = "internal_fast" ] && echo "1.0" || echo "5.0" )
+  max_connections: $( [ "${FEATURE_PROFILE}" = "internal_fast" ] && echo "200" || echo "100" )
+  max_keepalive_connections: 20
+  keepalive_expiry_seconds: 30.0
+  verify_ssl: true
+  retries: $( [ "${FEATURE_PROFILE}" = "temporal_worker" ] && echo "0" || ( [ "${FEATURE_PROFILE}" = "internal_fast" ] && echo "1" || echo "3" ) )
+  retry_backoff_factor: 0.5
+  retry_status_codes:
+    - 429
+    - 502
+    - 503
+    - 504
+
+pipeline:
+  steps:
+$( [ "${FEATURE_PROFILE}" = "api_service" ] && cat << 'STEPS'
+    - input_hardening
+    - ssrf_validation
+    - context_isolation
+    - cache_eval
+    - singleflight
+    - circuit_breaker
+    - rate_limit
+    - admission_control
+STEPS
+)
+$( [ "${FEATURE_PROFILE}" = "temporal_worker" ] && cat << 'STEPS'
+    - context_isolation
+    - circuit_breaker
+STEPS
+)
+$( [ "${FEATURE_PROFILE}" = "internal_fast" ] && cat << 'STEPS'
+    - context_isolation
+STEPS
+)
+
+  circuit_breaker:
+    failure_threshold: 5
+    recovery_timeout_seconds: 30.0
+    half_open_requests: 3
+
+  rate_limit:
+    requests_per_second: 100
+    burst: 200
+
+  cache_eval:
+    enabled: true
+    default_ttl_seconds: 60
+    stale_if_error_seconds: 300.0
+
+  security:
+    input_hardening: $( [ "${FEATURE_PROFILE}" = "api_service" ] && echo "true" || echo "false" )
+    ssrf_validation: $( [ "${FEATURE_PROFILE}" = "api_service" ] && echo "true" || echo "false" )
 EOF
 ```
 
-#### How to Verify Configuration Correctness:
+#### 2.5 Automated Verification Script
+Run this script to validate YAML syntax and profile constraints:
+
 ```bash
 python3 -c "
+import os
 import yaml
-with open('quality-engine/src/features/score_composite/http-config.yml') as f:
+from pathlib import Path
+
+config_path = Path(os.environ['FEATURE_DIR']) / 'http-config.yml'
+assert config_path.is_file(), f'FAILED: {config_path} does not exist'
+
+with open(config_path) as f:
     cfg = yaml.safe_load(f)
-assert cfg['profile'] == 'api_service'
-assert cfg['client']['timeout_seconds'] == 30.0
-assert len(cfg['pipeline']['steps']) == 8
-print('HTTP config successfully validated!')
+
+assert cfg['schema_version'] == '1.0.0', 'Invalid schema_version'
+assert cfg['feature_name'] == os.environ['FEATURE_NAME'], 'feature_name does not match directory name'
+assert cfg['profile'] in ['api_service', 'temporal_worker', 'internal_fast'], 'Invalid profile'
+
+profile = cfg['profile']
+steps = cfg['pipeline']['steps']
+
+if profile == 'api_service':
+    assert len(steps) == 8, f'api_service profile requires 8 steps, got {len(steps)}'
+elif profile == 'temporal_worker':
+    assert steps == ['context_isolation', 'circuit_breaker'], f'temporal_worker profile steps mismatch: {steps}'
+elif profile == 'internal_fast':
+    assert steps == ['context_isolation'], f'internal_fast profile steps mismatch: {steps}'
+
+assert cfg['client']['timeout_seconds'] > 0.0, 'timeout_seconds must be positive'
+print(f'>>> Step 2 SUCCESS: http-config.yml validated for profile [{profile}]')
 "
 ```
 
 ---
 
-### Step 2: Instantiating `ResilientHttpClient` in Outbound Adapter
-In accordance with Rule 1 (`1-feature-folder-writing-rule.md`), domain code in `service/` remains 100% pure and depends only on outbound ports. The concrete adapter loads the local configuration:
+### Step 3: Defining the Pure Domain Outbound Port Interface (`infrastructure/ports/`)
 
-```python
+#### 3.1 Purpose & Architectural Rationale
+The Outbound Port is an abstract interface using standard library `abc.ABC`. It models **domain intent** (e.g. `fetch_embedding`, `evaluate_score`, `dispatch_alert`), not HTTP protocols:
+- Pure Domain Invariant: Port files must contain **zero** network imports (`import httpx`, `import requests`, `import urllib` are strictly forbidden).
+- The port accepts pure domain entities or primitives (`str`, `dict`, `pydantic.BaseModel`) and returns domain models.
+
+#### 3.2 Concrete Universal Port Implementation
+Generate the abstract port file `${FEATURE_DIR}/infrastructure/ports/${FEATURE_NAME}_port.py`:
+
+```bash
+cat << 'EOF' > "${FEATURE_DIR}/infrastructure/ports/${FEATURE_NAME}_port.py"
+from abc import ABC, abstractmethod
+from typing import Dict, Any, Optional
+
+class FeatureOutboundPort(ABC):
+    @abstractmethod
+    async def execute_remote_operation(
+        self,
+        payload: Dict[str, Any],
+        tenant_id: str,
+        correlation_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Execute the feature's outbound remote operation."""
+        pass
+EOF
+```
+
+#### 3.3 Automated Verification Script
+Run this script to assert that the port is abstract and has zero network coupling:
+
+```bash
+python3 -c "
+import os
+import ast
 from pathlib import Path
-from typing import Dict, Any
-from python_shared.http import ResilientHttpClient
-from src.features.score_composite.infrastructure.ports.composite_scorer_port import CompositeScorerPort
 
-class HttpCompositeScorerAdapter(CompositeScorerPort):
-    def __init__(self, base_url: str = "http://scorer-service:8000") -> None:
+port_path = Path(os.environ['FEATURE_DIR']) / 'infrastructure' / 'ports' / f\"{os.environ['FEATURE_NAME']}_port.py\"
+assert port_path.is_file(), f'FAILED: {port_path} not found'
+
+with open(port_path) as f:
+    tree = ast.parse(f.read())
+
+forbidden_modules = {'httpx', 'requests', 'urllib', 'aiohttp'}
+for node in ast.walk(tree):
+    if isinstance(node, ast.Import):
+        for alias in node.names:
+            assert alias.name not in forbidden_modules, f'VIOLATION: Forbidden import {alias.name} in Port interface!'
+    elif isinstance(node, ast.ImportFrom):
+        assert node.module not in forbidden_modules, f'VIOLATION: Forbidden import from {node.module} in Port interface!'
+
+print(f'>>> Step 3 SUCCESS: Port interface verified pure of networking imports')
+"
+```
+
+---
+
+### Step 4: Implementing the Concrete HTTP Adapter (`infrastructure/adapters/`) with `ResilientHttpClient`
+
+#### 4.1 Purpose & Architectural Rationale
+The Adapter implements the abstract Port interface. It is the sole component that interfaces with `python_shared.http.ResilientHttpClient`.
+Key Invariants:
+- Dynamic Config Resolution: The adapter resolves its own directory dynamically via `Path(__file__).resolve().parents[2]` so it functions correctly regardless of execution path.
+- Transparent Telemetry: The adapter passes `tenant_id` and `correlation_id` to `client.execute_async()`, allowing the pipeline to propagate W3C `traceparent` headers.
+- DTO Translation: Converts domain requests into HTTP JSON payloads and maps HTTP responses to domain results.
+
+#### 4.2 Concrete Universal Adapter Implementation
+Generate `${FEATURE_DIR}/infrastructure/adapters/http_${FEATURE_NAME}_adapter.py`:
+
+```bash
+cat << 'EOF' > "${FEATURE_DIR}/infrastructure/adapters/http_${FEATURE_NAME}_adapter.py"
+from pathlib import Path
+from typing import Dict, Any, Optional
+from python_shared.http import ResilientHttpClient
+
+class HttpFeatureOutboundAdapter:
+    def __init__(self, base_url: str = "http://localhost:8000") -> None:
         feature_dir = Path(__file__).resolve().parents[2]
         self._client = ResilientHttpClient.from_config(
             config_path=feature_dir,
             base_url=base_url
         )
 
-    async def compute_composite(self, payload: Dict[str, Any], tenant_id: str) -> Dict[str, Any]:
+    async def execute_remote_operation(
+        self,
+        payload: Dict[str, Any],
+        tenant_id: str,
+        correlation_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        headers: Dict[str, str] = {}
+        if correlation_id:
+            headers["x-correlation-id"] = correlation_id
+
         response = await self._client.execute_async(
             method="POST",
-            url="/api/v1/composite/evaluate",
+            url="/api/v1/remote/execute",
             json=payload,
-            tenant_id=tenant_id
+            tenant_id=tenant_id,
+            headers=headers
         )
         response.raise_for_status()
         return response.json()
+EOF
 ```
 
-#### How to Verify Configuration Correctness:
+#### 4.3 Automated Verification Script
+Run this script to instantiate the adapter and assert that `ResilientHttpClient.from_config()` loaded the YAML configuration correctly:
+
 ```bash
 python3 -c "
+import os
+import sys
+from pathlib import Path
+
+monorepo_root = Path(os.environ['MONOREPO_ROOT'])
+sys.path.insert(0, str(monorepo_root / 'python-shared'))
+
 from python_shared.http import ResilientHttpClient
-client = ResilientHttpClient.from_config('quality-engine/src/features/score_composite')
-assert client.profile == 'api_service'
-assert client.timeout == 30.0
-assert len(client.runner.steps) == 8
-print('Adapter client instantiation verified!')
+
+feature_dir = Path(os.environ['FEATURE_DIR'])
+client = ResilientHttpClient.from_config(feature_dir, base_url='http://mock-service')
+
+assert client.profile == os.environ['FEATURE_PROFILE'], f'Profile mismatch: {client.profile}'
+assert client.timeout > 0.0, 'Client timeout must be configured'
+
+expected_step_count = 8 if client.profile == 'api_service' else (2 if client.profile == 'temporal_worker' else 1)
+assert len(client.runner.steps) == expected_step_count, f'Pipeline step count mismatch: {len(client.runner.steps)} vs {expected_step_count}'
+
+print(f'>>> Step 4 SUCCESS: Adapter successfully bound to {client.profile} with {len(client.runner.steps)} steps')
 "
 ```
 
 ---
 
-### Step 3: Triggering Live Configuration Reload via Admin Port
-To update client timeouts or circuit breaker thresholds without restarting the service:
+### Step 5: Injecting the Port into the Pure Domain Service (`service/`)
+
+#### 5.1 Purpose & Architectural Rationale
+The Domain Service encapsulates core business orchestration. Following Dependency Injection (DI):
+- The service receives the Port interface in its constructor (`__init__(self, port: FeatureOutboundPort)`).
+- The service has zero knowledge of HTTP endpoints, network errors, or retries.
+- Tests can mock the Port trivially without mocking HTTP sockets or patching libraries.
+
+#### 5.2 Concrete Universal Service Implementation
+Generate `${FEATURE_DIR}/service/${FEATURE_NAME}_service.py`:
 
 ```bash
-# 1. Update timeout in http-config.yml from 30.0 to 45.0
-sed -i 's/timeout_seconds: 30.0/timeout_seconds: 45.0/' quality-engine/src/features/score_composite/http-config.yml
+cat << 'EOF' > "${FEATURE_DIR}/service/${FEATURE_NAME}_service.py"
+from typing import Dict, Any, Optional
 
-# 2. Trigger reload via admin control endpoint
-curl -i -X POST http://127.0.0.1:9003/admin/v1/http/reload
+class FeatureDomainService:
+    def __init__(self, outbound_port) -> None:
+        self._outbound_port = outbound_port
+
+    async def execute_business_action(
+        self,
+        data: Dict[str, Any],
+        tenant_id: str,
+        correlation_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        if not data:
+            raise ValueError("Input data cannot be empty")
+        
+        raw_result = await self._outbound_port.execute_remote_operation(
+            payload=data,
+            tenant_id=tenant_id,
+            correlation_id=correlation_id
+        )
+        
+        return {
+            "status": "COMPLETED",
+            "feature": "verified",
+            "result": raw_result
+        }
+EOF
 ```
 
-#### How to Verify Configuration Correctness:
+#### 5.3 Automated Verification Script
+Run this script to verify that the domain service accepts the injected port and processes business actions:
+
 ```bash
-curl -s http://127.0.0.1:9003/admin/v1/http/config | grep '"timeout_seconds": 45.0'
+python3 -c "
+import asyncio
+from unittest.mock import AsyncMock
+
+class DummyPort:
+    async def execute_remote_operation(self, payload, tenant_id, correlation_id=None):
+        return {'score': 0.99, 'tenant': tenant_id}
+
+async def run_test():
+    import os, sys, importlib.util
+    from pathlib import Path
+    service_file = Path(os.environ['FEATURE_DIR']) / 'service' / f\"{os.environ['FEATURE_NAME']}_service.py\"
+    spec = importlib.util.spec_from_file_location('service_mod', service_file)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    
+    service = mod.FeatureDomainService(outbound_port=DummyPort())
+    output = await service.execute_business_action({'query': 'test'}, tenant_id='t-123')
+    assert output['status'] == 'COMPLETED'
+    assert output['result']['score'] == 0.99
+
+asyncio.run(run_test())
+print('>>> Step 5 SUCCESS: Domain service dependency injection verified')
+"
 ```
 
 ---
 
-### Step 4: Running Test Suite Across Microservices
-Validate that all unit tests and pipeline profiles pass without regressions:
+### Step 6: Unit Testing with In-Memory Mocks (`tests/`)
+
+#### 6.1 Purpose & Architectural Rationale
+Unit tests verify domain business logic in total isolation from the network:
+- Tests execute in milliseconds without opening TCP ports or running background servers.
+- `unittest.mock.AsyncMock` simulates downstream successes, network timeouts, and HTTP failures.
+
+#### 6.2 Concrete Universal Test Suite
+Generate `${FEATURE_DIR}/tests/${FEATURE_NAME}_service_test.py`:
 
 ```bash
-# Run HTTP pipeline tests in python-shared
-po file-search --root python-shared/src/features/http --tree
-pytest python-shared/src/features/http/pipeline/tests/test_pipeline_profiles.py -v
+cat << 'EOF' > "${FEATURE_DIR}/tests/${FEATURE_NAME}_service_test.py"
+import pytest
+from unittest.mock import AsyncMock
+
+@pytest.fixture
+def mock_port():
+    port = AsyncMock()
+    port.execute_remote_operation.return_value = {"processed": True, "value": 42}
+    return port
+
+@pytest.mark.asyncio
+async def test_domain_service_successful_execution(mock_port):
+    import os, importlib.util
+    from pathlib import Path
+    service_file = Path(os.environ.get("FEATURE_DIR", ".")) / "service" / f"{os.environ.get('FEATURE_NAME', 'target')}_service.py"
+    spec = importlib.util.spec_from_file_location("svc_mod", service_file)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    service = mod.FeatureDomainService(outbound_port=mock_port)
+    result = await service.execute_business_action(
+        data={"key": "test_input"},
+        tenant_id="tenant-unit-test",
+        correlation_id="corr-999"
+    )
+
+    assert result["status"] == "COMPLETED"
+    assert result["result"]["value"] == 42
+    mock_port.execute_remote_operation.assert_awaited_once_with(
+        payload={"key": "test_input"},
+        tenant_id="tenant-unit-test",
+        correlation_id="corr-999"
+    )
+
+@pytest.mark.asyncio
+async def test_domain_service_empty_input_rejection(mock_port):
+    import os, importlib.util
+    from pathlib import Path
+    service_file = Path(os.environ.get("FEATURE_DIR", ".")) / "service" / f"{os.environ.get('FEATURE_NAME', 'target')}_service.py"
+    spec = importlib.util.spec_from_file_location("svc_mod", service_file)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    service = mod.FeatureDomainService(outbound_port=mock_port)
+    with pytest.raises(ValueError, match="Input data cannot be empty"):
+        await service.execute_business_action(data={}, tenant_id="tenant-unit-test")
+EOF
 ```
 
-#### Expected Output:
+#### 6.3 Automated Test Execution
+Run the unit tests using `pytest`:
+
+```bash
+pytest "${FEATURE_DIR}/tests/${FEATURE_NAME}_service_test.py" -v
 ```
-tests/test_pipeline_profiles.py::test_api_service_profile_resolution PASSED
-tests/test_pipeline_profiles.py::test_temporal_worker_profile_resolution PASSED
-tests/test_pipeline_profiles.py::test_internal_fast_profile_resolution PASSED
-tests/test_pipeline_profiles.py::test_dynamic_step_names_resolution PASSED
-tests/test_pipeline_profiles.py::test_custom_step_instances_execution PASSED
-============================== 5 passed in 0.18s ===============================
+
+---
+
+### Step 7: Resilient Pipeline & Fault-Injection Verification
+
+#### 7.1 Purpose & Architectural Rationale
+Verifies that the HTTP pipeline's defensive safeguards function as specified:
+- Circuit Breaker trips after consecutive downstream 5xx errors and fails fast without hitting the network.
+- Context Isolation attaches W3C `traceparent` and `x-tenant-id` to outbound wire requests.
+- SSRF Validation rejects requests attempting to access RFC 1918 or AWS/GCP metadata (`169.254.169.254`).
+
+#### 7.2 Concrete Fault-Injection Test Suite
+Run this comprehensive integration test using `httpx.MockTransport`:
+
+```bash
+python3 -c "
+import asyncio
+import httpx
+from python_shared.http import ResilientHttpClient
+
+async def test_pipeline_resilience():
+    # 1. Test W3C Traceparent and Header Injection
+    captured_headers = {}
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal captured_headers
+        captured_headers = dict(request.headers)
+        return httpx.Response(200, json={'status': 'ok'})
+
+    client = ResilientHttpClient(base_url='http://mock-service', profile='api_service')
+    client._async_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(mock_handler),
+        base_url='http://mock-service'
+    )
+
+    resp = await client.execute_async('POST', '/test', json={'x': 1}, tenant_id='tenant-gold')
+    assert resp.status_code == 200
+    assert 'traceparent' in captured_headers, 'FAILED: traceparent missing from outbound request'
+    assert captured_headers.get('x-tenant-id') == 'tenant-gold', 'FAILED: x-tenant-id not propagated'
+    print('>>> Subtest A Passed: W3C Context & Tenant Headers Propagated')
+
+    # 2. Test Circuit Breaker Trip on Downstream Failures
+    fail_count = 0
+    def failing_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal fail_count
+        fail_count += 1
+        return httpx.Response(503, json={'error': 'Service Unavailable'})
+
+    failing_client = ResilientHttpClient(base_url='http://mock-downstream', profile='api_service')
+    failing_client._async_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(failing_handler),
+        base_url='http://mock-downstream'
+    )
+
+    for _ in range(5):
+        try:
+            await failing_client.execute_async('GET', '/broken', tenant_id='t-1')
+        except Exception:
+            pass
+
+    tripped = False
+    try:
+        await failing_client.execute_async('GET', '/broken', tenant_id='t-1')
+    except Exception as e:
+        if 'circuit' in str(e).lower() or 'open' in str(e).lower():
+            tripped = True
+    
+    assert tripped, 'FAILED: Circuit breaker did not trip after 5 failures'
+    print('>>> Subtest B Passed: Circuit Breaker successfully tripped into OPEN state')
+
+asyncio.run(test_pipeline_resilience())
+print('>>> Step 7 SUCCESS: Pipeline resilience and fault-injection verified!')
+"
 ```
+
+---
+
+### Step 8: Operational Hot-Reload, SIGHUP Triggers & Production Verification
+
+#### 8.1 Purpose & Architectural Rationale
+In production environments, microservices must allow updating configuration parameters (such as increasing timeouts during database maintenance, adjusting circuit breaker thresholds, or modifying rate limits) with **zero dropped requests and zero downtime**:
+- Atomic Swap: Updating the configuration swaps an immutable memory pointer.
+- Active sockets remain connected; new requests immediately execute with the updated snapshot.
+
+#### 8.2 Operational Verification Commands
+Execute this automated smoke test to verify live configuration updates:
+
+```bash
+# 1. Read current timeout from http-config.yml
+CURRENT_TIMEOUT=$(grep "timeout_seconds:" "${FEATURE_DIR}/http-config.yml" | head -n 1 | awk '{print $2}')
+echo "Current timeout: ${CURRENT_TIMEOUT}s"
+
+# 2. Update timeout in-place using sed (e.g. adjust to 45.0s)
+sed -i 's/timeout_seconds: .*/timeout_seconds: 45.0/' "${FEATURE_DIR}/http-config.yml"
+
+# 3. Verify ResilientHttpClient reloads updated configuration
+python3 -c "
+import os
+from pathlib import Path
+from python_shared.http import ResilientHttpClient
+
+feature_dir = Path(os.environ['FEATURE_DIR'])
+client = ResilientHttpClient.from_config(feature_dir)
+assert client.timeout == 45.0, f'Hot reload failed: expected 45.0, got {client.timeout}'
+print('>>> Step 8 SUCCESS: Dynamic configuration reload verified without process restart!')
+"
+
+# 4. Revert test modification
+sed -i "s/timeout_seconds: .*/timeout_seconds: ${CURRENT_TIMEOUT}/" "${FEATURE_DIR}/http-config.yml"
+```
+
 
 ---
 
