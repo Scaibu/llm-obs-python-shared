@@ -74,22 +74,22 @@ To permanently eradicate these failure modes, we adopted an architecture grounde
 
 ```mermaid
 flowchart TD
-    subgraph FeatureDomain["1. Domain Feature Layer (src/features/{feature}/)"]
-        Service[Domain Service] -->|Pure Domain Intent| Port[Hexagonal Outbound Port]
-        Port -->|Invokes Interface| Adapter[Outbound HTTP Adapter]
-        Adapter -->|Loads On Boot| ConfigFile["http-config.yml (Local Feature Config)"]
+    subgraph FeatureDomain["1. Domain Feature Layer (src/features/feature_name/)"]
+        Service["Domain Service"] -->|"Pure Domain Intent"| Port["Hexagonal Outbound Port"]
+        Port -->|"Invokes Interface"| Adapter["Outbound HTTP Adapter"]
+        Adapter -->|"Loads On Boot"| ConfigFile["http-config.yml (Local Feature Config)"]
     end
 
     subgraph ControlPlane["2. Control Plane & Configuration Engine"]
-        ConfigFile -->|YAML Parse & Validate| SnapshotMgr[Config Snapshot Manager]
-        AdminSignal["Admin Signals (SIGHUP / HTTP Reload)"] -->|Trigger Atomic Swap| SnapshotMgr
-        SnapshotMgr -->|Immutable Pointer| ClientFactory[Client Factory / Pool]
+        ConfigFile -->|"YAML Parse & Validate"| SnapshotMgr["Config Snapshot Manager"]
+        AdminSignal["Admin Signals (SIGHUP / HTTP Reload)"] -->|"Trigger Atomic Swap"| SnapshotMgr
+        SnapshotMgr -->|"Immutable Pointer"| ClientFactory["Client Factory / Pool"]
     end
 
     subgraph PipelineEngine["3. Composable HTTP Pipeline Engine (python-shared)"]
         Adapter -->|"execute_async()"| ClientFactory
-        ClientFactory --> ClientInstance[ResilientHttpClient]
-        ClientInstance --> PipelineRunner[HttpPipelineRunner]
+        ClientFactory --> ClientInstance["ResilientHttpClient"]
+        ClientInstance --> PipelineRunner["HttpPipelineRunner"]
         
         subgraph PipelineSteps["Ordered Pipeline Steps (Strict Mathematical Order)"]
             direction TB
@@ -109,14 +109,14 @@ flowchart TD
     end
 
     subgraph TransportLayer["4. Transport & Connection Pool Engine"]
-        PipelineSteps -->|Admitted, Sanitized & Traced| Transport[HTTPX Transport Pool]
-        Transport -->|HTTP/1.1 or HTTP/2 Multiplex| Wire[Physical Network Socket / Wire]
+        PipelineSteps -->|"Admitted, Sanitized & Traced"| Transport["HTTPX Transport Pool"]
+        Transport -->|"HTTP/1.1 or HTTP/2 Multiplex"| Wire["Physical Network Socket / Wire"]
     end
 
     subgraph MessagingPlane["5. Messaging & Observability Plane"]
-        PipelineSteps -.->|CloudEvents 1.0 Audits| KafkaAudit["Kafka Topic: http.outbound.audit.v1"]
-        PipelineSteps -.->|Retry Exhaustion / Outage| KafkaDLQ["Kafka Topic: http.outbound.dlq.v1"]
-        Transport -.->|OTel Spans & Metrics| Collector[OpenTelemetry Collector]
+        PipelineSteps -.->|"CloudEvents 1.0 Audits"| KafkaAudit["Kafka Topic: http.outbound.audit.v1"]
+        PipelineSteps -.->|"Retry Exhaustion / Outage"| KafkaDLQ["Kafka Topic: http.outbound.dlq.v1"]
+        Transport -.->|"OTel Spans & Metrics"| Collector["OpenTelemetry Collector"]
     end
 ```
 
@@ -587,44 +587,44 @@ The following call stack traces an outbound remote invocation from the domain ca
 
 ```mermaid
 flowchart TD
-    Start([1. Adapter Invocates execute_async]) --> Hardening{Input Hardening:<br/>CRLF in headers OR<br/>JSON depth > 20?}
+    Start(["1. Adapter Invocates execute_async"]) --> Hardening{"Input Hardening:<br/>CRLF in headers OR JSON depth > 20?"}
     
-    Hardening -- YES --> Reject400[Fail Fast: HTTP 400 Bad Request]
-    Hardening -- NO --> SSRF{SSRF Validation:<br/>Resolved IP in 169.254/16<br/>or Private RFC 1918?}
+    Hardening -- "YES" --> Reject400["Fail Fast: HTTP 400 Bad Request"]
+    Hardening -- "NO" --> SSRF{"SSRF Validation:<br/>Resolved IP in 169.254/16 or Private RFC 1918?"}
     
-    SSRF -- YES --> Reject403[Security Violation: Abort Request]
-    SSRF -- NO --> Context[Inject W3C traceparent<br/>and x-tenant-id]
+    SSRF -- "YES" --> Reject403["Security Violation: Abort Request"]
+    SSRF -- "NO" --> Context["Inject W3C traceparent and x-tenant-id"]
     
-    Context --> CacheCheck{Cache Eval:<br/>Enabled & Key in Cache?}
-    CacheCheck -- YES (Hit) --> ReturnCache[Short-Circuit: Return Cached Response]
-    CacheCheck -- NO (Miss) --> Singleflight{Singleflight:<br/>Identical request<br/>already in-flight?}
+    Context --> CacheCheck{"Cache Eval:<br/>Enabled & Key in Cache?"}
+    CacheCheck -- "YES (Hit)" --> ReturnCache["Short-Circuit: Return Cached Response"]
+    CacheCheck -- "NO (Miss)" --> Singleflight{"Singleflight:<br/>Identical request already in-flight?"}
     
-    Singleflight -- YES (Follower) --> AwaitLeader[Wait for Leader asyncio.Event]
-    AwaitLeader --> ReturnLeaderResp[Return Leader Shared Response]
+    Singleflight -- "YES (Follower)" --> AwaitLeader["Wait for Leader asyncio.Event"]
+    AwaitLeader --> ReturnLeaderResp["Return Leader Shared Response"]
     
-    Singleflight -- NO (Leader) --> CircuitCheck{Circuit Breaker:<br/>What is current state?}
-    CircuitCheck -- OPEN --> CheckRecovery{recovery_timeout<br/>expired?}
-    CheckRecovery -- NO --> Reject503[Fail Fast: CircuitBreakerOpenException]
-    CheckRecovery -- YES --> EnterHalfOpen[Transition to HALF-OPEN Probe]
+    Singleflight -- "NO (Leader)" --> CircuitCheck{"Circuit Breaker:<br/>What is current state?"}
+    CircuitCheck -- "OPEN" --> CheckRecovery{"recovery_timeout expired?"}
+    CheckRecovery -- "NO" --> Reject503["Fail Fast: CircuitBreakerOpenException"]
+    CheckRecovery -- "YES" --> EnterHalfOpen["Transition to HALF-OPEN Probe"]
     
-    CircuitCheck -- CLOSED --> RateCheck
-    EnterHalfOpen --> RateCheck{Rate Limit:<br/>Token available<br/>in TokenBucket?}
+    CircuitCheck -- "CLOSED" --> RateCheck
+    EnterHalfOpen --> RateCheck{"Rate Limit:<br/>Token available in TokenBucket?"}
     
-    RateCheck -- NO --> Reject429[Fail Fast: HTTP 429 Too Many Requests]
-    RateCheck -- YES --> BulkheadCheck{Admission Bulkhead:<br/>Concurrency slot<br/>available?}
+    RateCheck -- "NO" --> Reject429["Fail Fast: HTTP 429 Too Many Requests"]
+    RateCheck -- "YES" --> BulkheadCheck{"Admission Bulkhead:<br/>Concurrency slot available?"}
     
-    BulkheadCheck -- NO --> QueueCheck{Wait in queue <=<br/>queue_timeout_seconds?}
-    QueueCheck -- NO --> RejectBulkhead[Fail Fast: HTTP 503 Bulkhead Full]
-    QueueCheck -- YES --> WireIO
-    BulkheadCheck -- YES --> WireIO[Execute Outbound Wire Request via HTTPX]
+    BulkheadCheck -- "NO" --> QueueCheck{"Wait in queue <= queue_timeout_seconds?"}
+    QueueCheck -- "NO" --> RejectBulkhead["Fail Fast: HTTP 503 Bulkhead Full"]
+    QueueCheck -- "YES" --> WireIO
+    BulkheadCheck -- "YES" --> WireIO["Execute Outbound Wire Request via HTTPX"]
     
-    WireIO --> Outcome{Response Status?}
-    Outcome -- 2xx OK --> RecordSuccess[Update CB Success, Store Cache, Wake Followers]
-    Outcome -- 4xx Client Error --> NormalReturn[Return 4xx to Caller, Do NOT Trip CB]
-    Outcome -- 5xx / Timeout --> RetryCheck{Retry attempts<br/>remaining?}
+    WireIO --> Outcome{"Response Status?"}
+    Outcome -- "2xx OK" --> RecordSuccess["Update CB Success, Store Cache, Wake Followers"]
+    Outcome -- "4xx Client Error" --> NormalReturn["Return 4xx to Caller, Do NOT Trip CB"]
+    Outcome -- "5xx / Timeout" --> RetryCheck{"Retry attempts remaining?"}
     
-    RetryCheck -- YES --> Backoff[Sleep with Exponential Jitter] --> WireIO
-    RetryCheck -- NO --> TripCB[Increment CB Failure Count, Emit CloudEvent to DLQ] --> RaiseErr[Raise DownstreamException]
+    RetryCheck -- "YES" --> Backoff["Sleep with Exponential Jitter"] --> WireIO
+    RetryCheck -- "NO" --> TripCB["Increment CB Failure Count, Emit CloudEvent to DLQ"] --> RaiseErr["Raise DownstreamException"]
 ```
 
 ---

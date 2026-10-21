@@ -78,20 +78,20 @@ To permanently resolve these failure modes, we adopted an architecture governed 
 ```mermaid
 flowchart TD
     subgraph ExternalClients["1. Clients & Edge Gateway"]
-        Client[External Client] -->|HTTPS Request| LB[Edge Load Balancer / Envoy Proxy]
-        LB -->|Internal Network / PROXY Protocol| Listener[Kernel Socket Listener (SO_REUSEPORT)]
+        Client["External Client"] -->|"HTTPS Request"| LB["Edge Load Balancer / Envoy Proxy"]
+        LB -->|"Internal Network / PROXY Protocol"| Listener["Kernel Socket Listener (SO_REUSEPORT)"]
     end
 
     subgraph ServerCore["2. Server Transport Engine (Uvicorn / AsgiEngine)"]
-        Listener --> ConnMgr[Connection Manager]
-        ConnMgr -->|Connection Caps & Keepalive| Codec[HTTP/1.1 & HTTP/2 Codec]
+        Listener --> ConnMgr["Connection Manager"]
+        ConnMgr -->|"Connection Caps & Keepalive"| Codec["HTTP/1.1 & HTTP/2 Codec"]
     end
 
     subgraph ControlPlane["3. Control Plane & Configuration Engine"]
-        ConfigYAML["server-config.yml (Local Feature Config)"] -->|Parse & Validate| SnapshotMgr[ServerConfigurationService]
-        CELRules[CEL Cross-Field Validator] -->|Validate Mathematical Invariants| SnapshotMgr
-        SnapshotMgr -->|Frozen Snapshot Pointer| PolicySnapshot[ServerPolicySnapshot]
-        AdminPort["Admin Port (127.0.0.1:9090)"] -.->|Trigger Atomic Reload| SnapshotMgr
+        ConfigYAML["server-config.yml (Local Feature Config)"] -->|"Parse & Validate"| SnapshotMgr["ServerConfigurationService"]
+        CELRules["CEL Cross-Field Validator"] -->|"Validate Mathematical Invariants"| SnapshotMgr
+        SnapshotMgr -->|"Frozen Snapshot Pointer"| PolicySnapshot["ServerPolicySnapshot"]
+        AdminPort["Admin Port (127.0.0.1:9090)"] -.->|"Trigger Atomic Reload"| SnapshotMgr
     end
 
     subgraph IngressPipeline["4. Request Policy Pipeline (python-shared/src/features/server)"]
@@ -106,15 +106,15 @@ flowchart TD
     end
 
     subgraph FeatureIngress["5. Feature Delivery Layer (src/api/rest/v1/)"]
-        MW_Idempotency --> Router[FastAPI Router]
-        Router --> Handler[Ingress Delivery Handler]
-        Handler --> Service[Domain Feature Service]
+        MW_Idempotency --> Router["FastAPI Router"]
+        Router --> Handler["Ingress Delivery Handler"]
+        Handler --> Service["Domain Feature Service"]
     end
 
     subgraph MessagingPlane["6. Messaging & Observability Plane"]
-        MW_Telemetry -.->|CloudEvents 1.0| KafkaAudit["Kafka: server.ingress.audit.v1"]
-        MW_RateLimit -.->|Violations| KafkaSecurity["Kafka: server.security.violations.v1"]
-        MW_Telemetry -.->|OTel Server Metrics| Collector[OpenTelemetry Collector]
+        MW_Telemetry -.->|"CloudEvents 1.0"| KafkaAudit["Kafka: server.ingress.audit.v1"]
+        MW_RateLimit -.->|"Violations"| KafkaSecurity["Kafka: server.security.violations.v1"]
+        MW_Telemetry -.->|"OTel Server Metrics"| Collector["OpenTelemetry Collector"]
     end
 ```
 
@@ -479,52 +479,52 @@ The following call stack traces an inbound client request from the Linux kernel 
 
 ```mermaid
 flowchart TD
-    TCP_SYN([1. Client TCP SYN]) --> ConnCap{Total Connections <=<br/>total_connection_cap (10,000)?}
+    TCP_SYN(["1. Client TCP SYN"]) --> ConnCap{"Total Connections <= total_connection_cap (10,000)?"}
     
-    ConnCap -- NO --> TCP_RST[Drop Connection: Send TCP RST]
-    ConnCap -- YES --> ClientCap{Per-Client Connections <=<br/>per_client_cap (100)?}
+    ConnCap -- "NO" --> TCP_RST["Drop Connection: Send TCP RST"]
+    ConnCap -- "YES" --> ClientCap{"Per-Client Connections <= per_client_cap (100)?"}
     
-    ClientCap -- NO --> TCP_RST
-    ClientCap -- YES --> Handshake[Complete TLS & HTTP Codec]
+    ClientCap -- "NO" --> TCP_RST
+    ClientCap -- "YES" --> Handshake["Complete TLS & HTTP Codec"]
     
-    Handshake --> TraceContext{Has W3C<br/>traceparent header?}
-    TraceContext -- YES --> ExtractTrace[Adopt Parent Trace Context]
-    TraceContext -- NO --> GenerateTrace[Generate Root 128-bit Trace ID]
+    Handshake --> TraceContext{"Has W3C traceparent header?"}
+    TraceContext -- "YES" --> ExtractTrace["Adopt Parent Trace Context"]
+    TraceContext -- "NO" --> GenerateTrace["Generate Root 128-bit Trace ID"]
     
-    ExtractTrace --> PeerCheck{Proxy in<br/>trusted_proxies CIDR?}
+    ExtractTrace --> PeerCheck{"Proxy in trusted_proxies CIDR?"}
     GenerateTrace --> PeerCheck
     
-    PeerCheck -- NO --> RejectProxy[Reject Spoofed Client IP]
-    PeerCheck -- YES --> AdmissionCheck{In-Flight Concurrency <=<br/>global_admission_limit (1000)?}
+    PeerCheck -- "NO" --> RejectProxy["Reject Spoofed Client IP"]
+    PeerCheck -- "YES" --> AdmissionCheck{"In-Flight Concurrency <= global_admission_limit (1000)?"}
     
-    AdmissionCheck -- NO --> Reject503[Fail Fast: HTTP 503 Overloaded RFC 9457]
-    AdmissionCheck -- YES --> PreAuthRate{IP TokenBucket<br/>has available tokens?}
+    AdmissionCheck -- "NO" --> Reject503["Fail Fast: HTTP 503 Overloaded RFC 9457"]
+    AdmissionCheck -- "YES" --> PreAuthRate{"IP TokenBucket has available tokens?"}
     
-    PreAuthRate -- NO --> Reject429_IP[Fail Fast: HTTP 429 IP Rate Limited]
-    PreAuthRate -- YES --> AuthCheck{Bearer Token<br/>Valid JWT?}
+    PreAuthRate -- "NO" --> Reject429_IP["Fail Fast: HTTP 429 IP Rate Limited"]
+    PreAuthRate -- "YES" --> AuthCheck{"Bearer Token Valid JWT?"}
     
-    AuthCheck -- NO --> Reject401[Fail Fast: HTTP 401 Unauthorized]
-    AuthCheck -- YES --> TenantQuota{Tenant TokenBucket<br/>has available tokens?}
+    AuthCheck -- "NO" --> Reject401["Fail Fast: HTTP 401 Unauthorized"]
+    AuthCheck -- "YES" --> TenantQuota{"Tenant TokenBucket has available tokens?"}
     
-    TenantQuota -- NO --> Reject429_Tenant[Fail Fast: HTTP 429 Tenant Quota Exceeded]
-    TenantQuota -- YES --> DeadlineCheck{Remaining Budget - 50ms<br/>>= min_budget (10ms)?}
+    TenantQuota -- "NO" --> Reject429_Tenant["Fail Fast: HTTP 429 Tenant Quota Exceeded"]
+    TenantQuota -- "YES" --> DeadlineCheck{"Remaining Budget - 50ms >= min_budget (10ms)?"}
     
-    DeadlineCheck -- NO --> Reject504[Fail Fast: HTTP 504 Deadline Exceeded]
-    DeadlineCheck -- YES --> BodySizeCheck{Request Body <=<br/>max_body_bytes (10 MiB)?}
+    DeadlineCheck -- "NO" --> Reject504["Fail Fast: HTTP 504 Deadline Exceeded"]
+    DeadlineCheck -- "YES" --> BodySizeCheck{"Request Body <= max_body_bytes (10 MiB)?"}
     
-    BodySizeCheck -- NO --> Reject413[Fail Fast: HTTP 413 Payload Too Large]
-    BodySizeCheck -- YES --> DrainingCheck{Is Server in<br/>Graceful Draining Phase?}
+    BodySizeCheck -- "NO" --> Reject413["Fail Fast: HTTP 413 Payload Too Large"]
+    BodySizeCheck -- "YES" --> DrainingCheck{"Is Server in Graceful Draining Phase?"}
     
-    DrainingCheck -- YES on /readyz --> Return503_Drain[Return 503 Draining: Signal Pod Removal]
-    DrainingCheck -- NO / API Route --> ExecuteEndpoint[Execute Domain Handler & Service]
+    DrainingCheck -- "YES on /readyz" --> Return503_Drain["Return 503 Draining: Signal Pod Removal"]
+    DrainingCheck -- "NO / API Route" --> ExecuteEndpoint["Execute Domain Handler & Service"]
     
-    ExecuteEndpoint --> ErrorOccurred{Unhandled Exception<br/>Encountered?}
-    ErrorOccurred -- YES --> RFC9457[Format RFC 9457 Problem Details JSON<br/>Attach trace_id, Scrub Stack Trace]
-    ErrorOccurred -- NO --> Success200[Serialize JSON Response]
+    ExecuteEndpoint --> ErrorOccurred{"Unhandled Exception Encountered?"}
+    ErrorOccurred -- "YES" --> RFC9457["Format RFC 9457 Problem Details JSON<br/>Attach trace_id, Scrub Stack Trace"]
+    ErrorOccurred -- "NO" --> Success200["Serialize JSON Response"]
     
-    RFC9457 --> EgressHeaders[Inject x-correlation-id, x-request-id, traceparent]
+    RFC9457 --> EgressHeaders["Inject x-correlation-id, x-request-id, traceparent"]
     Success200 --> EgressHeaders
-    EgressHeaders --> RecordMetrics[Record Prometheus Duration Histogram] --> ReturnClient([Return Response to Client])
+    EgressHeaders --> RecordMetrics["Record Prometheus Duration Histogram"] --> ReturnClient(["Return Response to Client"])
 ```
 
 ---
