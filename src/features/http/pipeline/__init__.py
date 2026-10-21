@@ -3,6 +3,7 @@ Blueprint:
 - Package exports for features/http/pipeline.
 """
 from src.features.http.pipeline.types import RequestConfig, PipelineContext, PipelineStep
+from src.features.http.pipeline.security.input_hardening import StepInputHardening
 from src.features.http.pipeline.ssrf_validation import StepSsrfValidation
 from src.features.http.pipeline.context_isolation import StepContextIsolation
 from src.features.http.pipeline.cache_eval import StepCacheEval
@@ -16,6 +17,7 @@ __all__ = [
     "RequestConfig",
     "PipelineContext",
     "PipelineStep",
+    "StepInputHardening",
     "StepSsrfValidation",
     "StepContextIsolation",
     "StepCacheEval",

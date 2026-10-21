@@ -2,6 +2,7 @@ import os
 import yaml
 from typing import Any, Dict, List, Optional
 from src.features.http.pipeline.types import PipelineContext, RequestConfig
+from src.features.http.pipeline.security.input_hardening import StepInputHardening
 from src.features.http.pipeline.ssrf_validation import StepSsrfValidation
 from src.features.http.pipeline.context_isolation import StepContextIsolation
 from src.features.http.pipeline.cache_eval import StepCacheEval
@@ -9,18 +10,6 @@ from src.features.http.pipeline.singleflight import StepSingleflight
 from src.features.http.pipeline.circuit_breaker import StepCircuitBreaker
 from src.features.http.pipeline.rate_limit import StepRateLimit
 from src.features.http.pipeline.admission_control import StepAdmissionControl
-
-class StepInputHardening:
-    name: str = "InputHardening"
-    description: str = "Enforces RFC 7493 I-JSON rules, max nesting depth, and rejects CRLF header injection"
-
-    async def execute(self, ctx: Any) -> None:
-        from src.features.http.pipeline.security.input_hardening import InputHardeningRules
-        ctx.step_index += 1
-        if ctx.config.headers:
-            InputHardeningRules.reject_crlf_in_headers(ctx.config.headers)
-        if isinstance(ctx.config.body, str) and (ctx.config.body.strip().startswith("{") or ctx.config.body.strip().startswith("[")):
-            InputHardeningRules.parse_strict_ijson(ctx.config.body)
 
 class HttpPipelineRunner:
     def __init__(

@@ -2,7 +2,7 @@ from src.features.http.pipeline.resilience.standard_circuit_breaker import Stand
 from src.features.http.pipeline.resilience.retry_policy import RetryPolicy
 from src.features.http.pipeline.resilience.fleet_retry_budget import FleetRetryBudget
 from src.features.http.pipeline.resilience.concurrency_admission_control import ConcurrencyAdmissionControl
-from src.features.http.pipeline.resilience.tenant_rate_limiter import TenantRateLimiter, TokenBucketLimiter
+from src.features.http.pipeline.resilience.tenant_rate_limiter import TenantRateLimiter
 from src.features.http.pipeline.resilience.tenant_partitioned_cache_store import TenantPartitionedCacheStore
 
 CircuitBreaker = StandardCircuitBreaker
