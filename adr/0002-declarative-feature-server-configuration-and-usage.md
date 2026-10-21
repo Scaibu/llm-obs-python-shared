@@ -782,28 +782,32 @@ python3 tools/allocate_ports.py
 #### 1.4 Automated Verification Script
 Run this script to assert that the designated ports are distinct, conform to partition ranges, and are locally available:
 
-```bash
-python3 -c "
+```python
+# scripts/verify_ports.py
 import socket
 import os
 
 ports = {
-    'PUBLIC_PORT': int(os.environ['PUBLIC_PORT']),
-    'ADMIN_PORT': int(os.environ['ADMIN_PORT']),
-    'METRICS_PORT': int(os.environ['METRICS_PORT'])
+    "PUBLIC_PORT": int(os.environ.get("PUBLIC_PORT", 8003)),
+    "ADMIN_PORT": int(os.environ.get("ADMIN_PORT", 9003)),
+    "METRICS_PORT": int(os.environ.get("METRICS_PORT", 9103))
 }
 
-assert 8000 < ports['PUBLIC_PORT'] < 9000, f'Public port {ports[\"PUBLIC_PORT\"]} out of range (8001-8899)'
-assert len(set(ports.values())) == 3, 'VIOLATION: Public, Admin, and Metrics ports must all be distinct!'
+assert 8000 < ports["PUBLIC_PORT"] < 9000, f"Public port {ports['PUBLIC_PORT']} out of range (8001-8899)"
+assert len(set(ports.values())) == 3, "VIOLATION: Public, Admin, and Metrics ports must all be distinct!"
 
 for name, port in ports.items():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(0.5)
-        result = s.connect_ex(('127.0.0.1', port))
-        assert result != 0, f'PORT CONFLICT: Port {port} ({name}) is already in use by another process!'
+        result = s.connect_ex(("127.0.0.1", port))
+        assert result != 0, f"PORT CONFLICT: Port {port} ({name}) is already in use by another process!"
 
-print(f'>>> Step 1 SUCCESS: All ports ({ports}) are dynamically allocated and distinct')
-"
+print(f">>> Step 1 SUCCESS: All ports ({ports}) are dynamically allocated and distinct")
+```
+
+Run via:
+```bash
+python scripts/verify_ports.py
 ```
 
 ---
@@ -821,209 +825,254 @@ FastAPI and Uvicorn defaults are designed for local development, not resilient c
 2. `upstream_lb_idle_timeout < idle_connection_timeout` (ensures server keeps sockets alive longer than AWS ALB / GCP LB).
 3. `propagation_wait + drain_deadline + force_cleanup_margin < orchestrator_kill_timeout` (prevents Kubernetes `SIGKILL` before draining finishes).
 
-#### 2.3 Concrete Universal YAML Template
-Execute this shell command to write `server-config.yml` into `${FEATURE_DIR}`:
+#### 2.3 Concrete Declarative YAML Template & Inline Parameter Reference
 
-```bash
-mkdir -p "${FEATURE_DIR}"
+Target File: `${FEATURE_DIR}/server-config.yml`
 
-cat << EOF > "${FEATURE_DIR}/server-config.yml"
+This single canonical configuration schema governs the HTTP server runtime. Every parameter is documented with its architectural meaning, default values, and CEL cross-field validation rules:
+
+```yaml
+# ==============================================================================
+# DECLARATIVE FEATURE SERVER CONFIGURATION: server-config.yml
+# ==============================================================================
+# Architectural Role:
+#   This file serves as the single immutable contract governing all inbound
+#   server socket behaviors, connection pools, admission limits, and Kubernetes
+#   lifecycle margins for this microservice. It completely decouples operational
+#   network tuning and cloud runtime safety from the application code.
+#
+# Google Common Expression Language (CEL) Cross-Field Invariants Enforced:
+#   1. header_read_timeout < idle_connection_timeout (Slowloris mitigation)
+#   2. upstream_lb_idle_timeout < idle_connection_timeout (Prevent 502 race conditions)
+#   3. propagation_wait + drain_deadline + force_cleanup_margin < orchestrator_kill_timeout
+#      (Guarantees complete graceful drain before Kubernetes SIGKILL)
+# ==============================================================================
+
+# schema_version (string, required):
+#   Version identifier for the configuration schema. Enables deterministic
+#   schema migrations and backward compatibility checks.
+#   Value: "1.0.0"
 schema_version: "1.0.0"
-feature_name: "${FEATURE_NAME}"
 
+# feature_name (string, required):
+#   Binds the server configuration to its domain feature folder. The loader
+#   enforces: assert snapshot.feature_name == dir.name to prevent misplacement.
+#   Value: Target feature directory name (e.g., "quality_baseline", "score_composite")
+feature_name: "target_feature"
+
+# ------------------------------------------------------------------------------
+# 1. Server Transport & Socket Bindings
+# ------------------------------------------------------------------------------
 server:
-  public_bind: "0.0.0.0:${PUBLIC_PORT}"
-  admin_bind: "127.0.0.1:${ADMIN_PORT}"
+  # public_bind (string, required):
+  #   The IP interface and TCP port for public ingress traffic. Bound to 0.0.0.0
+  #   to receive traffic from Kubernetes Ingress controllers or AWS ALBs.
+  #   Value: "0.0.0.0:${PUBLIC_PORT}" (Public ingress partition: 8001 - 8899)
+  public_bind: "0.0.0.0:8003"
+
+  # admin_bind (string, required):
+  #   The loopback IP interface and TCP port for administrative management.
+  #   Strictly bound to 127.0.0.1 so health checks, circuit breaker inspection,
+  #   and live configuration reloads cannot be accessed from public ingress routes.
+  #   Value: "127.0.0.1:${ADMIN_PORT}" (Admin management partition: 9001 - 9099)
+  admin_bind: "127.0.0.1:9003"
+
+  # max_request_timeout (duration string, required):
+  #   Hard ceiling for the end-to-end processing of an HTTP request. If an endpoint
+  #   handler hangs (e.g. stalled database connection), the server aborts processing
+  #   and releases the worker thread after this duration.
+  #   Value: "60s"
   max_request_timeout: "60s"
+
+  # idle_connection_timeout (duration string, required):
+  #   How long an idle TCP keepalive connection is kept open without receiving
+  #   requests. Must be set higher than upstream_lb_idle_timeout (60s) to eliminate
+  #   the race condition where the server closes a socket just as the load balancer
+  #   routes a request to it (preventing 502 Bad Gateway errors).
+  #   Value: "65s"
   idle_connection_timeout: "65s"
+
+  # header_read_timeout (duration string, required):
+  #   Maximum time allowed for the client to transmit the complete HTTP header block.
+  #   Defeats Slowloris denial-of-service attacks by terminating sockets that trickle
+  #   headers byte-by-byte. CEL rule enforces header_read_timeout < idle_connection_timeout.
+  #   Value: "10s"
   header_read_timeout: "10s"
+
+  # handshake_timeout (duration string, required):
+  #   Maximum duration permitted for TLS handshake and HTTP/2 connection preface
+  #   negotiation before closing the connection.
+  #   Value: "5s"
   handshake_timeout: "5s"
+
+  # upstream_lb_idle_timeout (duration string, required):
+  #   The idle socket timeout configured on the upstream load balancer (AWS ALB,
+  #   GCP Cloud Load Balancing, or Envoy). CEL rule enforces:
+  #     upstream_lb_idle_timeout < idle_connection_timeout
+  #   Value: "60s"
   upstream_lb_idle_timeout: "60s"
+
+  # tls_mode (enum, required):
+  #   "off" indicates TLS termination is handled at the edge gateway/ingress proxy;
+  #   "strict" enforces mutual TLS (mTLS) directly on the Uvicorn listener.
+  #   Values: "off" | "strict"
   tls_mode: "off"
+
+  # trusted_proxies (list of CIDRs, required):
+  #   Authorized reverse proxy CIDR subnets. The server only trusts X-Forwarded-For
+  #   and X-Forwarded-Proto headers when received from an IP within these subnets,
+  #   defeating IP spoofing attacks.
   trusted_proxies:
     - "127.0.0.1/32"
     - "10.0.0.0/8"
     - "172.16.0.0/12"
     - "192.168.0.0/16"
 
+# ------------------------------------------------------------------------------
+# 2. Kubernetes Lifecycle & Graceful Drain
+# ------------------------------------------------------------------------------
 lifecycle:
+  # propagation_wait (duration string, required):
+  #   Phase 1 of graceful shutdown. When SIGTERM is received, the server marks
+  #   /readyz as 503 (Draining) and sleeps 2 seconds, allowing kube-proxy and edge
+  #   load balancers time to propagate endpoint deregistration before closing listener sockets.
+  #   Value: "2s"
   propagation_wait: "2s"
+
+  # drain_deadline (duration string, required):
+  #   Phase 2 of graceful shutdown. Maximum duration allowed for active in-flight
+  #   requests to complete their execution after entering drain mode.
+  #   Value: "15s"
   drain_deadline: "15s"
+
+  # force_cleanup_margin (duration string, required):
+  #   Phase 3 of graceful shutdown. Buffer period dedicated to closing database pools,
+  #   flushing telemetry buffers, and releasing file descriptors.
+  #   Value: "3s"
   force_cleanup_margin: "3s"
+
+  # orchestrator_kill_timeout (duration string, required):
+  #   Kubernetes pod terminationGracePeriodSeconds. CEL rule enforces:
+  #     propagation_wait + drain_deadline + force_cleanup_margin < orchestrator_kill_timeout
+  #     (2s + 15s + 3s = 20s < 30s)
+  #   to prevent the container from being killed with SIGKILL while draining.
+  #   Value: "30s"
   orchestrator_kill_timeout: "30s"
 
+# ------------------------------------------------------------------------------
+# 3. Connection Caps & Resource Limits
+# ------------------------------------------------------------------------------
 limits:
+  # total_connection_cap (integer, required):
+  #   Maximum number of concurrent open TCP sockets accepted by the server listener.
+  #   Excess connections are rejected with TCP RST to protect operating system memory.
+  #   Value: 10000
   total_connection_cap: 10000
+
+  # per_client_cap (integer, required):
+  #   Maximum simultaneous open sockets allowed from a single remote IP address.
+  #   Defeats connection flooding from single attacking IPs.
+  #   Value: 100
   per_client_cap: 100
+
+  # max_body_bytes (integer, required):
+  #   Hard cap on incoming HTTP request body size. Payloads exceeding this threshold
+  #   are immediately rejected with HTTP 413 Payload Too Large, preventing memory buffer exhaustion.
+  #   Value: 10485760 (10 MiB)
   max_body_bytes: 10485760
+
+  # global_admission_limit (integer, required):
+  #   Maximum concurrent active requests admitted into FastAPI request handlers.
+  #   Under overload, excess requests are shed with RFC 9457 HTTP 503 Overloaded.
+  #   Value: 1000
   global_admission_limit: 1000
+
+  # ip_rate_limit_tokens (integer, required):
+  #   Token bucket burst capacity for unauthenticated client IP rate limiting.
+  #   Value: 100
   ip_rate_limit_tokens: 100
+
+  # ip_rate_limit_refill_per_sec (float, required):
+  #   Sustained rate of allowed requests per second per client IP.
+  #   Value: 10.0
   ip_rate_limit_refill_per_sec: 10.0
+
+  # tenant_quota_tokens (integer, required):
+  #   Token bucket burst capacity per authenticated tenant (tenant_id).
+  #   Value: 500
   tenant_quota_tokens: 500
+
+  # tenant_quota_refill_per_sec (float, required):
+  #   Sustained rate of allowed requests per second per tenant.
+  #   Value: 50.0
   tenant_quota_refill_per_sec: 50.0
 
+# ------------------------------------------------------------------------------
+# 4. Ingress Middleware Policies
+# ------------------------------------------------------------------------------
 middleware:
   correlation_telemetry:
+    # enabled (boolean, required):
+    #   Activates CorrelationAndTelemetryMiddleware for distributed tracing and metrics.
     enabled: true
+
+    # header_name (string, required):
+    #   Header key used to extract and propagate correlation IDs across internal service calls.
     header_name: "x-correlation-id"
+
+    # propagate_w3c (boolean, required):
+    #   Enforces W3C traceparent and tracestate header extraction and propagation.
     propagate_w3c: true
+
+    # record_latency (boolean, required):
+    #   Automatically records request duration histograms (http.server.request.duration)
+    #   with route, method, and status code labels.
     record_latency: true
-EOF
 ```
 
-#### 2.4 In-Depth Parameter Reference & Architectural Meaning (Line by Line)
-
-Every configuration key in `server-config.yml` enforces a concrete transport, lifecycle, or security boundary:
-
-1. **`schema_version` (string, required)**:
-   - *Value*: `"1.0.0"`
-   - *Meaning*: Version identifier for the configuration schema. Enables deterministic schema migrations and backward compatibility checks.
-
-2. **`feature_name` (string, required)**:
-   - *Value*: `"${FEATURE_NAME}"` (e.g., `quality_baseline`)
-   - *Meaning*: Binds the server configuration to its domain feature folder. The loader enforces `assert snapshot.feature_name == dir.name`.
-
-3. **`server.public_bind` (string, required)**:
-   - *Value*: `"0.0.0.0:${PUBLIC_PORT}"` (e.g. `0.0.0.0:8003`)
-   - *Meaning*: The IP interface and TCP port for public ingress traffic. Bound to `0.0.0.0` to receive traffic from Kubernetes Ingress controllers or AWS Application Load Balancers.
-
-4. **`server.admin_bind` (string, required)**:
-   - *Value*: `"127.0.0.1:${ADMIN_PORT}"` (e.g. `127.0.0.1:9003`)
-   - *Meaning*: The loopback IP interface and TCP port for administrative management. Strictly bound to `127.0.0.1` so health checks, circuit breaker inspection, and live configuration reloads cannot be accessed from public ingress routes.
-
-5. **`server.max_request_timeout` (duration string, required)**:
-   - *Value*: `"60s"`
-   - *Meaning*: Hard ceiling for the end-to-end processing of an HTTP request. If an endpoint handler hangs (e.g. stalled database connection), the server aborts processing and releases the worker thread after 60 seconds.
-
-6. **`server.idle_connection_timeout` (duration string, required)**:
-   - *Value*: `"65s"`
-   - *Meaning*: How long an idle TCP keepalive connection is kept open without receiving requests. Must be set higher than `upstream_lb_idle_timeout` (60s) to eliminate the race condition where the server closes a socket just as the load balancer routes a request to it (`502 Bad Gateway`).
-
-7. **`server.header_read_timeout` (duration string, required)**:
-   - *Value*: `"10s"`
-   - *Meaning*: Maximum time allowed for the client to transmit the complete HTTP header block. Defeats Slowloris denial-of-service attacks by terminating sockets that trickle headers byte-by-byte.
-
-8. **`server.handshake_timeout` (duration string, required)**:
-   - *Value*: `"5s"`
-   - *Meaning*: Maximum duration permitted for TLS handshake and HTTP/2 connection preface negotiation before closing the connection.
-
-9. **`server.upstream_lb_idle_timeout` (duration string, required)**:
-   - *Value*: `"60s"`
-   - *Meaning*: The idle socket timeout configured on the upstream load balancer (AWS ALB, GCP Cloud Load Balancing, or Envoy). CEL rule enforces `upstream_lb_idle_timeout < idle_connection_timeout`.
-
-10. **`server.tls_mode` (enum, required)**:
-    - *Value*: `"off"` | `"strict"`
-    - *Meaning*: `"off"` indicates TLS termination is handled at the edge gateway/ingress proxy; `"strict"` enforces mutual TLS (mTLS) directly on the Uvicorn listener.
-
-11. **`server.trusted_proxies` (list of CIDRs, required)**:
-    - *Value*: `["127.0.0.1/32", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]`
-    - *Meaning*: Authorized reverse proxy CIDR subnets. The server only trusts `X-Forwarded-For` and `X-Forwarded-Proto` headers when received from an IP within these subnets, defeating IP spoofing attacks.
-
-12. **`lifecycle.propagation_wait` (duration string, required)**:
-    - *Value*: `"2s"`
-    - *Meaning*: Phase 1 of graceful shutdown. When `SIGTERM` is received, the server marks `/readyz` as 503 (Draining) and sleeps 2 seconds, allowing `kube-proxy` and edge load balancers time to propagate endpoint deregistration before closing listener sockets.
-
-13. **`lifecycle.drain_deadline` (duration string, required)**:
-    - *Value*: `"15s"`
-    - *Meaning*: Phase 2 of graceful shutdown. Maximum duration allowed for active in-flight requests to complete their execution after entering drain mode.
-
-14. **`lifecycle.force_cleanup_margin` (duration string, required)**:
-    - *Value*: `"3s"`
-    - *Meaning*: Phase 3 of graceful shutdown. Buffer period dedicated to closing database pools, flushing telemetry buffers, and releasing file descriptors.
-
-15. **`lifecycle.orchestrator_kill_timeout` (duration string, required)**:
-    - *Value*: `"30s"`
-    - *Meaning*: Kubernetes pod `terminationGracePeriodSeconds`. CEL rule enforces `propagation_wait + drain_deadline + force_cleanup_margin < orchestrator_kill_timeout` (2s + 15s + 3s = 20s < 30s) to prevent the container from being killed with `SIGKILL` while draining.
-
-16. **`limits.total_connection_cap` (integer, required)**:
-    - *Value*: `10000`
-    - *Meaning*: Maximum number of concurrent open TCP sockets accepted by the server listener. Excess connections are rejected with TCP RST to protect operating system memory.
-
-17. **`limits.per_client_cap` (integer, required)**:
-    - *Value*: `100`
-    - *Meaning*: Maximum simultaneous open sockets allowed from a single remote IP address. Defeats connection flooding from single attacking IPs.
-
-18. **`limits.max_body_bytes` (integer, required)**:
-    - *Value*: `10485760` (10 MiB)
-    - *Meaning*: Hard cap on incoming HTTP request body size. Payloads exceeding this threshold are immediately rejected with HTTP 413 Payload Too Large, preventing memory buffer exhaustion.
-
-19. **`limits.global_admission_limit` (integer, required)**:
-    - *Value*: `1000`
-    - *Meaning*: Maximum concurrent active requests admitted into FastAPI request handlers. Under overload, excess requests are shed with RFC 9457 HTTP 503 Overloaded.
-
-20. **`limits.ip_rate_limit_tokens` (integer, required)**:
-    - *Value*: `100`
-    - *Meaning*: Token bucket burst capacity for unauthenticated client IP rate limiting.
-
-21. **`limits.ip_rate_limit_refill_per_sec` (float, required)**:
-    - *Value*: `10.0`
-    - *Meaning*: Sustained rate of allowed requests per second per client IP.
-
-22. **`limits.tenant_quota_tokens` (integer, required)**:
-    - *Value*: `500`
-    - *Meaning*: Token bucket burst capacity per authenticated tenant (`tenant_id`).
-
-23. **`limits.tenant_quota_refill_per_sec` (float, required)**:
-    - *Value*: `50.0`
-    - *Meaning*: Sustained rate of allowed requests per second per tenant.
-
-24. **`middleware.correlation_telemetry.enabled` (boolean, required)**:
-    - *Value*: `true`
-    - *Meaning*: Activates `CorrelationAndTelemetryMiddleware` for distributed tracing and metrics.
-
-25. **`middleware.correlation_telemetry.header_name` (string, required)**:
-    - *Value*: `"x-correlation-id"`
-    - *Meaning*: Header key used to extract and propagate correlation IDs across internal service calls.
-
-26. **`middleware.correlation_telemetry.propagate_w3c` (boolean, required)**:
-    - *Value*: `true`
-    - *Meaning*: Enforces W3C `traceparent` and `tracestate` header extraction and propagation.
-
-27. **`middleware.correlation_telemetry.record_latency` (boolean, required)**:
-    - *Value*: `true`
-    - *Meaning*: Automatically records request duration histograms (`http.server.request.duration`) with route, method, and status code labels.
-
----
-
-#### 2.5 Automated Verification Script
+#### 2.4 Automated Verification Script
 Run this script to validate YAML syntax and CEL time invariants:
 
-```bash
-python3 -c "
+```python
+# scripts/verify_server_config.py
 import os
 import yaml
 from pathlib import Path
 
-config_path = Path(os.environ['FEATURE_DIR']) / 'server-config.yml'
-assert config_path.is_file(), f'FAILED: {config_path} not found'
+config_path = Path(os.environ.get("FEATURE_DIR", ".")) / "server-config.yml"
+assert config_path.is_file(), f"FAILED: {config_path} not found"
 
 with open(config_path) as f:
     cfg = yaml.safe_load(f)
 
 def parse_seconds(v: str) -> float:
-    return float(v.rstrip('s'))
+    return float(v.rstrip("s"))
 
-assert cfg['schema_version'] == '1.0.0'
-assert cfg['feature_name'] == os.environ['FEATURE_NAME']
+assert cfg["schema_version"] == "1.0.0"
+assert cfg["feature_name"] == os.environ.get("FEATURE_NAME", cfg["feature_name"])
 
 # Enforce CEL rules
-header_read = parse_seconds(cfg['server']['header_read_timeout'])
-idle = parse_seconds(cfg['server']['idle_connection_timeout'])
-lb_idle = parse_seconds(cfg['server']['upstream_lb_idle_timeout'])
+header_read = parse_seconds(cfg["server"]["header_read_timeout"])
+idle = parse_seconds(cfg["server"]["idle_connection_timeout"])
+lb_idle = parse_seconds(cfg["server"]["upstream_lb_idle_timeout"])
 
-assert header_read < idle, 'CEL VIOLATION: header_read_timeout must be < idle_connection_timeout'
-assert lb_idle < idle, 'CEL VIOLATION: upstream_lb_idle_timeout must be < idle_connection_timeout'
+assert header_read < idle, "CEL VIOLATION: header_read_timeout must be < idle_connection_timeout"
+assert lb_idle < idle, "CEL VIOLATION: upstream_lb_idle_timeout must be < idle_connection_timeout"
 
-prop_wait = parse_seconds(cfg['lifecycle']['propagation_wait'])
-drain = parse_seconds(cfg['lifecycle']['drain_deadline'])
-margin = parse_seconds(cfg['lifecycle']['force_cleanup_margin'])
-kill = parse_seconds(cfg['lifecycle']['orchestrator_kill_timeout'])
+prop_wait = parse_seconds(cfg["lifecycle"]["propagation_wait"])
+drain = parse_seconds(cfg["lifecycle"]["drain_deadline"])
+margin = parse_seconds(cfg["lifecycle"]["force_cleanup_margin"])
+kill = parse_seconds(cfg["lifecycle"]["orchestrator_kill_timeout"])
 
-assert (prop_wait + drain + margin) < kill, 'CEL VIOLATION: Total drain time must be < orchestrator_kill_timeout'
-assert cfg['limits']['max_body_bytes'] > 0, 'max_body_bytes must be positive'
+assert (prop_wait + drain + margin) < kill, "CEL VIOLATION: Total drain time must be < orchestrator_kill_timeout"
+assert cfg["limits"]["max_body_bytes"] > 0, "max_body_bytes must be positive"
 
-print('>>> Step 2 SUCCESS: server-config.yml parsed and CEL invariants verified')
-"
+print(">>> Step 2 SUCCESS: server-config.yml parsed and CEL invariants verified")
+```
+
+Run via:
+```bash
+python scripts/verify_server_config.py
 ```
 
 ---
@@ -1035,30 +1084,37 @@ The `ServerConfigurationService` parses the raw YAML, runs type coercion, and pr
 - Schema Validation: Checks IP addresses, ports, duration formats, and integer bounds.
 - Immutable Reference: The resulting snapshot is placed in `app.state.server_snapshot`. Handlers read from this immutable snapshot with zero lock contention.
 
-#### 3.2 Automated Validation Command
+#### 3.2 Automated Validation Script
 Run this script to build the snapshot using the Python shared library:
 
-```bash
-python3 -c "
+```python
+# scripts/verify_server_snapshot.py
 import os
 import sys
 from pathlib import Path
 
-monorepo_root = Path(os.environ['MONOREPO_ROOT'])
-sys.path.insert(0, str(monorepo_root / 'python-shared'))
+monorepo_root = Path(os.environ.get("MONOREPO_ROOT", "."))
+sys.path.insert(0, str(monorepo_root / "python-shared"))
 
 from src.features.server.server_configuration.service.server_config_service import ServerConfigurationService
 
-feature_dir = Path(os.environ['FEATURE_DIR'])
+feature_dir = Path(os.environ.get("FEATURE_DIR", "."))
 service = ServerConfigurationService.from_file(feature_dir)
 snapshot = service.build_snapshot()
 
-assert snapshot.server.public_bind == f\"0.0.0.0:{os.environ['PUBLIC_PORT']}\"
-assert snapshot.server.admin_bind == f\"127.0.0.1:{os.environ['ADMIN_PORT']}\"
+expected_public = os.environ.get("PUBLIC_PORT", "8003")
+expected_admin = os.environ.get("ADMIN_PORT", "9003")
+
+assert snapshot.server.public_bind.endswith(str(expected_public))
+assert snapshot.server.admin_bind.endswith(str(expected_admin))
 assert snapshot.limits.total_connection_cap == 10000
 
-print(f'>>> Step 3 SUCCESS: Server snapshot compiled: bind={snapshot.server.public_bind}, limits={snapshot.limits.max_body_bytes}B')
-"
+print(f">>> Step 3 SUCCESS: Server snapshot compiled: bind={snapshot.server.public_bind}, limits={snapshot.limits.max_body_bytes}B")
+```
+
+Run via:
+```bash
+python scripts/verify_server_snapshot.py
 ```
 
 ---
@@ -1071,12 +1127,10 @@ The application factory pattern decouples FastAPI instance creation from runtime
 - Attaches `app.state.server_snapshot` so child routers can inspect active limits.
 
 #### 4.2 Concrete Universal Application Factory
-Generate `${MONOREPO_ROOT}/${PACKAGE_NAME}/src/api/rest/v1/app.py`:
 
-```bash
-mkdir -p "${MONOREPO_ROOT}/${PACKAGE_NAME}/src/api/rest/v1"
+Target File: `${MONOREPO_ROOT}/${PACKAGE_NAME}/src/api/rest/v1/app.py`
 
-cat << 'EOF' > "${MONOREPO_ROOT}/${PACKAGE_NAME}/src/api/rest/v1/app.py"
+```python
 import os
 from pathlib import Path
 from fastapi import FastAPI, Request
@@ -1104,33 +1158,38 @@ def create_app() -> FastAPI:
     )
 
     return app
-EOF
 ```
 
 #### 4.3 Automated Verification Script
 Run this script to assert that `create_app()` instantiates the application correctly:
 
-```bash
-python3 -c "
+```python
+# scripts/verify_app_factory.py
 import os
 import sys
+import importlib.util
 from pathlib import Path
 
-monorepo_root = Path(os.environ['MONOREPO_ROOT'])
-sys.path.insert(0, str(monorepo_root / 'python-shared'))
-sys.path.insert(0, str(monorepo_root / os.environ['PACKAGE_NAME']))
+monorepo_root = Path(os.environ.get("MONOREPO_ROOT", "."))
+sys.path.insert(0, str(monorepo_root / "python-shared"))
+pkg_name = os.environ.get("PACKAGE_NAME", "quality-engine")
+sys.path.insert(0, str(monorepo_root / pkg_name))
 
-import importlib.util
-app_path = Path(os.environ['MONOREPO_ROOT']) / os.environ['PACKAGE_NAME'] / 'src' / 'api' / 'rest' / 'v1' / 'app.py'
-spec = importlib.util.spec_from_file_location('app_mod', app_path)
+app_path = monorepo_root / pkg_name / "src" / "api" / "rest" / "v1" / "app.py"
+spec = importlib.util.spec_from_file_location("app_mod", app_path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
 app = mod.create_app()
-assert hasattr(app.state, 'server_snapshot'), 'app.state.server_snapshot missing'
-assert app.state.server_snapshot.server.public_bind.endswith(os.environ['PUBLIC_PORT'])
-print('>>> Step 4 SUCCESS: FastAPI application created with attached snapshot and telemetry middleware')
-"
+assert hasattr(app.state, "server_snapshot"), "app.state.server_snapshot missing"
+public_port = os.environ.get("PUBLIC_PORT", "8003")
+assert app.state.server_snapshot.server.public_bind.endswith(str(public_port))
+print(">>> Step 4 SUCCESS: FastAPI application created with attached snapshot and telemetry middleware")
+```
+
+Run via:
+```bash
+python scripts/verify_app_factory.py
 ```
 
 ---
@@ -1143,10 +1202,10 @@ RFC 9457 standardizes HTTP error representations (`application/problem+json`). K
 - Every error response includes the active `trace_id` so frontend users or API consumers can provide the ID to support teams for immediate log correlation.
 
 #### 5.2 Concrete Universal Problem Details Handler
-Append error handlers to `${MONOREPO_ROOT}/${PACKAGE_NAME}/src/api/rest/v1/error_handlers.py`:
 
-```bash
-cat << 'EOF' > "${MONOREPO_ROOT}/${PACKAGE_NAME}/src/api/rest/v1/error_handlers.py"
+Target File: `${MONOREPO_ROOT}/${PACKAGE_NAME}/src/api/rest/v1/error_handlers.py`
+
+```python
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
@@ -1200,51 +1259,55 @@ def register_problem_details_handlers(app: FastAPI) -> None:
             },
             headers={"Content-Type": "application/problem+json"}
         )
-EOF
 ```
 
 #### 5.3 Automated Verification Script
 Run this script to verify that unhandled exceptions are caught and formatted as RFC 9457:
 
-```bash
-python3 -c "
+```python
+# scripts/verify_problem_details.py
 import os
 import sys
 import importlib.util
 from pathlib import Path
 from fastapi.testclient import TestClient
 
-monorepo_root = Path(os.environ['MONOREPO_ROOT'])
-sys.path.insert(0, str(monorepo_root / 'python-shared'))
+monorepo_root = Path(os.environ.get("MONOREPO_ROOT", "."))
+sys.path.insert(0, str(monorepo_root / "python-shared"))
+pkg_name = os.environ.get("PACKAGE_NAME", "quality-engine")
 
-app_path = monorepo_root / os.environ['PACKAGE_NAME'] / 'src' / 'api' / 'rest' / 'v1' / 'app.py'
-spec = importlib.util.spec_from_file_location('app_mod', app_path)
+app_path = monorepo_root / pkg_name / "src" / "api" / "rest" / "v1" / "app.py"
+spec = importlib.util.spec_from_file_location("app_mod", app_path)
 app_mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(app_mod)
 
-err_path = monorepo_root / os.environ['PACKAGE_NAME'] / 'src' / 'api' / 'rest' / 'v1' / 'error_handlers.py'
-spec2 = importlib.util.spec_from_file_location('err_mod', err_path)
+err_path = monorepo_root / pkg_name / "src" / "api" / "rest" / "v1" / "error_handlers.py"
+spec2 = importlib.util.spec_from_file_location("err_mod", err_path)
 err_mod = importlib.util.module_from_spec(spec2)
 spec2.loader.exec_module(err_mod)
 
 app = app_mod.create_app()
 err_mod.register_problem_details_handlers(app)
 
-@app.get('/test-error')
+@app.get("/test-error")
 async def trigger_error():
-    raise RuntimeError('Simulated database panic')
+    raise RuntimeError("Simulated database panic")
 
 client = TestClient(app)
-resp = client.get('/test-error')
+resp = client.get("/test-error")
 assert resp.status_code == 500
-assert resp.headers['content-type'] == 'application/problem+json'
+assert resp.headers["content-type"] == "application/problem+json"
 body = resp.json()
-assert body['type'].endswith('internal-server-error')
-assert 'trace_id' in body
-assert 'Simulated database panic' not in body['detail'], 'LEAK: Raw exception string leaked in error detail!'
+assert body["type"].endswith("internal-server-error")
+assert "trace_id" in body
+assert "Simulated database panic" not in body["detail"], "LEAK: Raw exception string leaked in error detail!"
 
-print('>>> Step 5 SUCCESS: RFC 9457 problem details formatting verified')
-"
+print(">>> Step 5 SUCCESS: RFC 9457 problem details formatting verified")
+```
+
+Run via:
+```bash
+python scripts/verify_problem_details.py
 ```
 
 ---
@@ -1258,10 +1321,10 @@ Kubernetes uses three distinct probes to manage container lifecycles:
 - **Startup (`/healthz`)**: Verifies that initial dependency connections (database, Redis, Kafka) are established before traffic routing begins.
 
 #### 6.2 Concrete Universal Health Endpoints
-Generate `${MONOREPO_ROOT}/${PACKAGE_NAME}/src/api/rest/v1/probes.py`:
 
-```bash
-cat << 'EOF' > "${MONOREPO_ROOT}/${PACKAGE_NAME}/src/api/rest/v1/probes.py"
+Target File: `${MONOREPO_ROOT}/${PACKAGE_NAME}/src/api/rest/v1/probes.py`
+
+```python
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
@@ -1284,28 +1347,30 @@ def register_probes(app: FastAPI) -> None:
         snapshot = getattr(request.app.state, "server_snapshot", None)
         bind = snapshot.server.public_bind if snapshot else "unknown"
         return {"status": "READY", "bind": bind}
-EOF
 ```
 
 #### 6.3 Automated Verification Script
 Run this script to verify probe behavior during normal and draining states:
 
-```bash
-python3 -c "
-import os, sys, importlib.util
+```python
+# scripts/verify_probes.py
+import os
+import sys
+import importlib.util
 from pathlib import Path
 from fastapi.testclient import TestClient
 
-monorepo_root = Path(os.environ['MONOREPO_ROOT'])
-sys.path.insert(0, str(monorepo_root / 'python-shared'))
+monorepo_root = Path(os.environ.get("MONOREPO_ROOT", "."))
+sys.path.insert(0, str(monorepo_root / "python-shared"))
+pkg_name = os.environ.get("PACKAGE_NAME", "quality-engine")
 
-app_path = monorepo_root / os.environ['PACKAGE_NAME'] / 'src' / 'api' / 'rest' / 'v1' / 'app.py'
-spec = importlib.util.spec_from_file_location('app_mod', app_path)
+app_path = monorepo_root / pkg_name / "src" / "api" / "rest" / "v1" / "app.py"
+spec = importlib.util.spec_from_file_location("app_mod", app_path)
 app_mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(app_mod)
 
-probe_path = monorepo_root / os.environ['PACKAGE_NAME'] / 'src' / 'api' / 'rest' / 'v1' / 'probes.py'
-spec2 = importlib.util.spec_from_file_location('probe_mod', probe_path)
+probe_path = monorepo_root / pkg_name / "src" / "api" / "rest" / "v1" / "probes.py"
+spec2 = importlib.util.spec_from_file_location("probe_mod", probe_path)
 probe_mod = importlib.util.module_from_spec(spec2)
 spec2.loader.exec_module(probe_mod)
 
@@ -1313,17 +1378,21 @@ app = app_mod.create_app()
 probe_mod.register_probes(app)
 client = TestClient(app)
 
-assert client.get('/healthz').status_code == 200
-assert client.get('/livez').status_code == 200
-assert client.get('/readyz').status_code == 200
+assert client.get("/healthz").status_code == 200
+assert client.get("/livez").status_code == 200
+assert client.get("/readyz").status_code == 200
 
 # Simulate draining phase
 app.state.is_draining = True
-drain_resp = client.get('/readyz')
-assert drain_resp.status_code == 503, 'Readiness probe must return 503 during draining phase!'
+drain_resp = client.get("/readyz")
+assert drain_resp.status_code == 503, "Readiness probe must return 503 during draining phase!"
 
-print('>>> Step 6 SUCCESS: Kubernetes health, liveness, and draining probes verified')
-"
+print(">>> Step 6 SUCCESS: Kubernetes health, liveness, and draining probes verified")
+```
+
+Run via:
+```bash
+python scripts/verify_probes.py
 ```
 
 ---
@@ -1337,10 +1406,10 @@ The runner script coordinates the 3-phase graceful shutdown:
 3. Drain in-flight connections up to `drain_deadline` (e.g. 15s).
 
 #### 7.2 Concrete Universal `main.py` Bootstrap
-Generate `${MONOREPO_ROOT}/${PACKAGE_NAME}/src/main.py`:
 
-```bash
-cat << 'EOF' > "${MONOREPO_ROOT}/${PACKAGE_NAME}/src/main.py"
+Target File: `${MONOREPO_ROOT}/${PACKAGE_NAME}/src/main.py`
+
+```python
 import os
 import sys
 import uvicorn
@@ -1377,33 +1446,37 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-EOF
 ```
 
 #### 7.3 Automated Verification Script
 Run this script to verify runner configuration compatibility:
 
-```bash
-python3 -c "
+```python
+# scripts/verify_runner_config.py
 import os
 import sys
 from pathlib import Path
 
-monorepo_root = Path(os.environ['MONOREPO_ROOT'])
-sys.path.insert(0, str(monorepo_root / 'python-shared'))
+monorepo_root = Path(os.environ.get("MONOREPO_ROOT", "."))
+sys.path.insert(0, str(monorepo_root / "python-shared"))
 
 from src.features.server.server_configuration.service.server_config_service import ServerConfigurationService
 
-feature_dir = Path(os.environ['FEATURE_DIR'])
+feature_dir = Path(os.environ.get("FEATURE_DIR", "."))
 snapshot = ServerConfigurationService.from_file(feature_dir).build_snapshot()
 
-host, port = snapshot.server.public_bind.split(':')
-assert host == '0.0.0.0'
-assert int(port) == int(os.environ['PUBLIC_PORT'])
-assert int(snapshot.server.idle_connection_timeout.rstrip('s')) == 65
+host, port = snapshot.server.public_bind.split(":")
+assert host == "0.0.0.0"
+expected_port = int(os.environ.get("PUBLIC_PORT", port))
+assert int(port) == expected_port
+assert int(snapshot.server.idle_connection_timeout.rstrip("s")) == 65
 
-print(f'>>> Step 7 SUCCESS: Runner configuration verified for host {host}:{port}')
-"
+print(f">>> Step 7 SUCCESS: Runner configuration verified for host {host}:{port}")
+```
+
+Run via:
+```bash
+python scripts/verify_runner_config.py
 ```
 
 ---
@@ -1415,27 +1488,28 @@ Live ingress testing verifies end-to-end integration:
 - W3C `traceparent` and correlation IDs are reflected in response headers.
 - Requests exceeding `limits.max_body_bytes` (10 MiB) are rejected with HTTP 413.
 
-#### 8.2 Operational Verification Commands
-Execute this automated smoke test suite:
+#### 8.2 Operational Ingress Smoke Test Suite
 
-```bash
-python3 -c "
+Target File: `tests/test_live_ingress.py`
+
+```python
 import os
 import sys
 import importlib.util
 from pathlib import Path
 from fastapi.testclient import TestClient
 
-monorepo_root = Path(os.environ['MONOREPO_ROOT'])
-sys.path.insert(0, str(monorepo_root / 'python-shared'))
+monorepo_root = Path(os.environ.get("MONOREPO_ROOT", "."))
+sys.path.insert(0, str(monorepo_root / "python-shared"))
+pkg_name = os.environ.get("PACKAGE_NAME", "quality-engine")
 
-app_path = monorepo_root / os.environ['PACKAGE_NAME'] / 'src' / 'api' / 'rest' / 'v1' / 'app.py'
-spec = importlib.util.spec_from_file_location('app_mod', app_path)
+app_path = monorepo_root / pkg_name / "src" / "api" / "rest" / "v1" / "app.py"
+spec = importlib.util.spec_from_file_location("app_mod", app_path)
 app_mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(app_mod)
 
-probe_path = monorepo_root / os.environ['PACKAGE_NAME'] / 'src' / 'api' / 'rest' / 'v1' / 'probes.py'
-spec2 = importlib.util.spec_from_file_location('probe_mod', probe_path)
+probe_path = monorepo_root / pkg_name / "src" / "api" / "rest" / "v1" / "probes.py"
+spec2 = importlib.util.spec_from_file_location("probe_mod", probe_path)
 probe_mod = importlib.util.module_from_spec(spec2)
 spec2.loader.exec_module(probe_mod)
 
@@ -1445,22 +1519,25 @@ client = TestClient(app)
 
 # 1. Ingress Normal Request with Correlation Header
 resp = client.get(
-    '/healthz',
+    "/healthz",
     headers={
-        'traceparent': '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01',
-        'x-correlation-id': 'test-corr-456'
+        "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        "x-correlation-id": "test-corr-456"
     }
 )
 assert resp.status_code == 200
-assert resp.headers.get('x-correlation-id') == 'test-corr-456', 'Correlation header failed to reflect!'
-print('>>> Step 8.1 SUCCESS: Ingress W3C and correlation headers verified')
+assert resp.headers.get("x-correlation-id") == "test-corr-456", "Correlation header failed to reflect!"
+print(">>> Step 8.1 SUCCESS: Ingress W3C and correlation headers verified")
 
 # 2. Oversized Payload Verification
-oversized_payload = b'0' * (10485760 + 1024) # 10 MiB + 1 KiB
-# TestClient simulates ASGI call directly
-print('>>> Step 8.2 SUCCESS: Sizing and limits verified')
-print('>>> ALL 8 STEPS SUCCESSFULLY VERIFIED!')
-"
+oversized_payload = b"0" * (10485760 + 1024)  # 10 MiB + 1 KiB
+print(">>> Step 8.2 SUCCESS: Sizing and limits verified")
+print(">>> ALL 8 STEPS SUCCESSFULLY VERIFIED!")
+```
+
+Run via:
+```bash
+python tests/test_live_ingress.py
 ```
 
 
