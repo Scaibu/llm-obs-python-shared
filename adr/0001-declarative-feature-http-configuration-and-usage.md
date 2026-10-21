@@ -312,187 +312,275 @@ The following call stack traces an outbound remote invocation from the domain ca
 #### 4.4.1 Exhaustive IF/ELSE Branching & Loop ASCII Tree (All Paths Covered)
 
 ```text
-┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│                        HTTP PIPELINE EXECUTION ENGINE: EXHAUSTIVE IF/ELSE BRANCHING & LOOP ASCII TREE                  │
-└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
++------------------------------------------------------------------------------------------------------------------------+
+|                      HTTP OUTBOUND RESILIENT PIPELINE: EXHAUSTIVE IF/ELSE & LOOP EXECUTION TREE                        |
+|                     (All Conditions, Loops, Fallbacks, Circuit States, and Error Paths Covered)                       |
++------------------------------------------------------------------------------------------------------------------------+
 
-▼ [CALL] ResilientHttpClient.execute_async(method, url, json, tenant_id, headers)
-  │
-  ├─► STEP 1: Input Hardening & Sanitization (StepInputHardening)
-  │   │
-  │   ├── IF (any(contains("\r") or contains("\n") for h in headers.values())) THEN:
-  │   │   ├── ✖ LOG ALERT: "CRLF injection detected in outbound headers"
-  │   │   └── 🛑 RAISE SecurityHardeningException("HTTP Header Splitting Attempt Blocked", status_code=400)
-  │   │
-  │   ├── ELSE IF (json_body != None AND json_depth(json_body) > 20) THEN:
-  │   │   ├── ✖ LOG ALERT: "JSON payload nesting depth exceeds maximum ceiling of 20"
-  │   │   └── 🛑 RAISE SecurityHardeningException("Payload Recursion Limit Exceeded", status_code=400)
-  │   │
-  │   └── ELSE:
-  │       └── ✔ PASS: Payload and headers sanitized. Proceed to Step 2.
-  │
-  ├─► STEP 2: SSRF Domain & IP Firewall (StepSsrfValidation)
-  │   │
-  │   ├── IF (config.security.ssrf_validation == False) THEN:
-  │   │   └── ⚡ SKIP: SSRF validation bypassed (internal_fast profile).
-  │   │
-  │   └── ELSE:
-  │       ├── target_ip = socket.getaddrinfo(url.hostname, url.port)[0][4][0]
-  │       ├── IF (target_ip IN "169.254.0.0/16" [Cloud Instance Metadata]) THEN:
-  │       │   ├── ✖ LOG CRITICAL: "SSRF Attempt to Cloud Instance Metadata: " + target_ip
-  │       │   ├── ⚡ KAFKA: Publish CloudEvent to 'http.outbound.audit.v1' (topic: security_violation)
-  │       │   └── 🛑 RAISE SSRFSecurityViolation("Target IP is restricted AWS/GCP cloud metadata", status_code=403)
-  │       │
-  │       ├── ELSE IF (target_ip IN ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]) THEN:
-  │       │   ├── ✖ LOG ALERT: "SSRF Attempt to Private RFC 1918 VPC Subnet: " + target_ip
-  │       │   └── 🛑 RAISE SSRFSecurityViolation("Private VPC destinations forbidden", status_code=403)
-  │       │
-  │       └── ELSE:
-  │           └── ✔ PASS: Target IP verified as a legitimate public routable destination.
-  │
-  ├─► STEP 3: Context & Distributed Tracing (StepContextIsolation)
-  │   │
-  │   ├── IF (active_span := opentelemetry.trace.get_current_span()):
-  │   │   └── headers["traceparent"] = format_w3c_traceparent(active_span.context)
-  │   ├── ELSE:
-  │   │   └── headers["traceparent"] = generate_root_w3c_traceparent()
-  │   ├── headers["x-tenant-id"] = tenant_id
-  │   ├── headers["x-request-id"] = correlation_id or uuid4()
-  │   └── ✔ PASS: Outbound headers enriched with W3C and tenant context.
-  │
-  ├─► STEP 4: HTTP Response Caching (StepCacheEval)
-  │   │
-  │   ├── cache_key = sha256(tenant_id + ":" + method + ":" + url + ":" + body_hash)
-  │   ├── IF (config.cache_eval.enabled == True):
-  │   │   ├── cached_entry = cache_store.get(cache_key)
-  │   │   ├── IF (cached_entry != None AND not cached_entry.is_expired()):
-  │   │   │   ├── 💾 LOG: "Cache HIT for key: " + cache_key
-  │   │   │   └── ✔ RETURN cached_entry.to_response(status_code=200, headers={"X-Cache": "HIT"})
-  │   │   └── ELSE:
-  │   │       └── ⚡ LOG: "Cache MISS for key: " + cache_key (Proceed to Singleflight)
-  │   └── ELSE:
-  │       └── ⚡ PASS: Caching disabled.
-  │
-  ├─► STEP 5: In-Flight Request Deduplication (StepSingleflight)
-  │   │
-  │   ├── in_flight_lock.acquire()
-  │   ├── IF (leader_task := in_flight_registry.get(cache_key)):
-  │   │   ├── in_flight_lock.release()
-  │   │   ├── ⏳ LOG: "Identical request in-flight. Registered as FOLLOWER on key: " + cache_key
-  │   │   ├── await leader_task.completion_event.wait(timeout=config.client.timeout_seconds)
-  │   │   ├── IF (leader_task.exception):
-  │   │   │   └── 🛑 RE-RAISE leader_task.exception (Bypassed network, mirrored leader outcome)
-  │   │   └── ELSE:
-  │   │       └── ✔ RETURN leader_task.response.clone(headers={"X-Singleflight": "FOLLOWER"})
-  │   │
-  │   └── ELSE:
-  │       ├── in_flight_registry[cache_key] = current_task (Registered as LEADER)
-  │       ├── in_flight_lock.release()
-  │       └── ✔ PROCEED as LEADER to Circuit Breaker
-  │
-  ├─► STEP 6: Circuit Breaker Evaluation (StepCircuitBreaker)
-  │   │
-  │   ├── state = circuit_breaker.get_state()
-  │   ├── IF (state == "OPEN"):
-  │   │   ├── elapsed_since_trip = now() - circuit_breaker.tripped_timestamp
-  │   │   ├── IF (elapsed_since_trip >= config.circuit_breaker.recovery_timeout_seconds):
-  │   │   │   ├── circuit_breaker.transition_to("HALF-OPEN")
-  │   │   │   └── ⚡ LOG: "Recovery timeout elapsed. Entering HALF-OPEN trial probe state."
-  │   │   │
-  │   │   └── ELSE:
-  │   │       ├── ✖ LOG WARN: "Circuit is OPEN. Fast-failing outbound request without network I/O."
-  │   │       ├── IF (config.cache_eval.stale_if_error_seconds > 0 AND (stale := cache.get_stale(cache_key))):
-  │   │       │   └── ✔ RETURN stale.to_response(headers={"X-Cache": "STALE-DEGRADED"})
-  │   │       └── ELSE:
-  │   │           └── 🛑 RAISE CircuitBreakerOpenException("Circuit breaker OPEN (5 consecutive failures)", 503)
-  │   │
-  │   ├── ELSE IF (state == "HALF-OPEN"):
-  │   │   ├── IF (circuit_breaker.half_open_probes_in_flight >= config.circuit_breaker.half_open_requests):
-  │   │   │   └── 🛑 RAISE CircuitBreakerOpenException("Max HALF-OPEN probe capacity reached", 503)
-  │   │   └── ELSE:
-  │   │       └── ⚡ PASS: Allowed as trial probe request.
-  │   │
-  │   └── ELSE (state == "CLOSED"):
-  │       └── ✔ PASS: Downstream healthy. Proceed to Step 7.
-  │
-  ├─► STEP 7: Token Bucket Rate Limiting (StepRateLimit)
-  │   │
-  │   ├── IF (config.rate_limit.enabled):
-  │   │   ├── tokens_available = token_bucket.consume(1)
-  │   │   ├── IF (tokens_available == False):
-  │   │   │   ├── ✖ LOG WARN: "Rate limit threshold breached for tenant: " + tenant_id
-  │   │   │   └── 🛑 RAISE RateLimitExceededException("Outbound rate limit exceeded. Retry later.", 429)
-  │   │   └── ELSE:
-  │   │       └── ✔ PASS: Token acquired from bucket.
-  │   └── ELSE:
-  │       └── ⚡ PASS: Rate limiting bypassed for profile.
-  │
-  ├─► STEP 8: Bulkhead Admission Control (StepAdmissionControl)
-  │   │
-  │   ├── acquired = await semaphore.acquire_timeout(timeout=config.admission_control.queue_timeout_seconds)
-  │   ├── IF (acquired == False):
-  │   │   ├── ✖ LOG CRITICAL: "Concurrency bulkhead saturated. Queue timeout exceeded."
-  │   │   └── 🛑 RAISE BulkheadRejectionException("Outbound admission bulkhead saturated (100 concurrent)", 503)
-  │   └── ELSE:
-  │       └── 🔒 SLOT RESERVED: Proceed to physical wire dispatch.
-  │
-  ▼ [NETWORK WIRE I/O LOOP & TRANSIENT RETRY ENGINE]
-  │
-  ├── FOR attempt IN 0 .. config.client.retries:
-  │   │
-  │   ├── TRY:
-  │   │   ├── send_start = now()
-  │   │   ├── raw_response = await httpx_client.send(request, timeout=config.client.timeout_seconds)
-  │   │   ├── latency = now() - send_start
-  │   │   │
-  │   │   ├── IF (raw_response.status_code IN [200, 201, 202, 204]):
-  │   │   │   ├── ✔ STATUS 2xx: Request succeeded!
-  │   │   │   ├── IF (circuit_breaker.state == "HALF-OPEN"):
-  │   │   │   │   ├── circuit_breaker.record_probe_success()
-  │   │   │   │   └── IF (probe_successes >= config.circuit_breaker.half_open_requests):
-  │   │   │   │       └── circuit_breaker.transition_to("CLOSED") [HEALED!]
-  │   │   │   ├── ELSE:
-  │   │   │   │   └── circuit_breaker.reset_failure_count()
-  │   │   │   ├── IF (config.cache_eval.enabled):
-  │   │   │   │   └── cache_store.set(cache_key, raw_response, ttl=config.cache_eval.default_ttl_seconds)
-  │   │   │   └── BREAK RETRY LOOP -> PROCEED TO UNWIND
-  │   │   │
-  │   │   ├── ELSE IF (raw_response.status_code IN [400, 401, 403, 404, 422]):
-  │   │   │   ├── ✖ STATUS 4xx: Deterministic client error (non-transient).
-  │   │   │   ├── Do NOT retry! Do NOT trip circuit breaker!
-  │   │   │   └── BREAK RETRY LOOP -> RETURN raw_response
-  │   │   │
-  │   │   └── ELSE IF (raw_response.status_code IN config.client.retry_status_codes [429, 502, 503, 504]):
-  │   │       ├── ✖ STATUS 5xx: Transient downstream failure.
-  │   │       ├── circuit_breaker.record_failure()
-  │   │       ├── IF (attempt < config.client.retries):
-  │   │       │   ├── sleep_time = (config.client.retry_backoff_factor * (2 ** attempt)) * random(0.5, 1.5)
-  │   │       │   ├── ⟳ LOG: "Retry attempt " + (attempt + 1) + " sleeping " + sleep_time + "s (jittered)"
-  │   │       │   ├── await asyncio.sleep(sleep_time)
-  │   │       │   └── CONTINUE LOOP (Retry next attempt)
-  │   │       └── ELSE:
-  │   │           ├── ✖ RETRIES EXHAUSTED!
-  │   │           ├── ⚡ KAFKA: Publish CloudEvent to 'http.outbound.dlq.v1'
-  │   │           └── 🛑 RAISE DownstreamServiceUnavailableException(raw_response.text, raw_response.status_code)
-  │   │
-  │   └── EXCEPT (httpx.TimeoutException, httpx.ConnectError) as net_err:
-  │       ├── circuit_breaker.record_failure()
-  │       ├── IF (attempt < config.client.retries):
-  │       │   ├── sleep_time = (config.client.retry_backoff_factor * (2 ** attempt)) * random(0.5, 1.5)
-  │       │   ├── ⟳ LOG: "Network error " + str(net_err) + ". Retrying after " + sleep_time + "s"
-  │       │   ├── await asyncio.sleep(sleep_time)
-  │       │   └── CONTINUE LOOP
-  │       └── ELSE:
-  │           ├── ⚡ KAFKA: Publish CloudEvent to 'http.outbound.dlq.v1'
-  │           └── 🛑 RAISE RemoteHostUnreachableException(str(net_err))
-  │
-  ▼ [UNWINDING & RESOURCE CLEANUP]
-  │
-  ├── semaphore.release() [Bulkhead slot freed]
-  ├── IF (current_task == leader_task):
-  │   ├── in_flight_registry.remove(cache_key)
-  │   └── leader_task.completion_event.set() [Wakes all waiting follower tasks!]
-  └── ✔ RETURN raw_response to HttpFeatureOutboundAdapter -> FeatureDomainService
+[INVOCATION] FeatureDomainService -> FeatureOutboundPort -> HttpFeatureOutboundAdapter
+   |
+   +--> ResilientHttpClient.execute_async(method, url, json_body, tenant_id, correlation_id, headers)
+          |
+          +-- [PIPELINE INITIALIZATION]
+          |     Create PipelineContext(request, tenant_id, correlation_id, start_time)
+          |
+          +-- STEP 1: Input Hardening & Sanitization [StepInputHardening]
+          |     |
+          |     +-- IF (any("\r" in v or "\n" in v for v in headers.values())) THEN:
+          |     |     |-- [LOG ALERT] "CRLF injection detected in outbound headers"
+          |     |     |-- [METRIC] Increment counter 'security.hardening.crlf_detected'
+          |     |     +-- [RAISE] SecurityHardeningException("HTTP Header Splitting Blocked", status_code=400)
+          |     |
+          |     +-- ELSE IF (json_body is not None AND calculate_json_depth(json_body) > 20) THEN:
+          |     |     |-- [LOG ALERT] "JSON payload nesting depth exceeds maximum allowed ceiling of 20"
+          |     |     |-- [METRIC] Increment counter 'security.hardening.recursion_limit_exceeded'
+          |     |     +-- [RAISE] SecurityHardeningException("Payload Recursion Limit Exceeded", status_code=400)
+          |     |
+          |     +-- ELSE:
+          |           +-- [PASS] Payload and headers sanitized. Proceed to Step 2.
+          |
+          +-- STEP 2: SSRF Domain & IP Firewall [StepSsrfValidation]
+          |     |
+          |     +-- IF (config.security.ssrf_validation == False) THEN:
+          |     |     +-- [SKIP] SSRF validation bypassed by configuration (internal_fast profile).
+          |     |
+          |     +-- ELSE:
+          |           |-- target_ip = socket.getaddrinfo(url.hostname, url.port)[0][4][0]
+          |           |
+          |           +-- IF (target_ip in "169.254.0.0/16" [Cloud Instance Metadata]) THEN:
+          |           |     |-- [LOG CRITICAL] "SSRF Attempt to Cloud Instance Metadata IP: " + target_ip
+          |           |     |-- [EVENT] Kafka CloudEvent -> 'http.outbound.audit.v1' (topic: security_violation)
+          |           |     |-- [METRIC] Increment counter 'security.ssrf.cloud_metadata_blocked'
+          |           |     +-- [RAISE] SSRFSecurityViolation("Target IP is cloud metadata", status_code=403)
+          |           |
+          |           +-- ELSE IF (target_ip in ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "::1"]) THEN:
+          |           |     |-- [LOG ALERT] "SSRF Attempt to Private RFC 1918 / Loopback Subnet: " + target_ip
+          |           |     |-- [EVENT] Kafka CloudEvent -> 'http.outbound.audit.v1' (topic: security_violation)
+          |           |     |-- [METRIC] Increment counter 'security.ssrf.rfc1918_blocked'
+          |           |     +-- [RAISE] SSRFSecurityViolation("Private VPC destinations forbidden", status_code=403)
+          |           |
+          |           +-- ELSE:
+          |                 +-- [PASS] Target IP verified as a legitimate public routable destination.
+          |
+          +-- STEP 3: Context & Distributed Tracing [StepContextIsolation]
+          |     |
+          |     +-- IF (active_span := opentelemetry.trace.get_current_span()):
+          |     |     +-- headers["traceparent"] = format_w3c_traceparent(active_span.context)
+          |     +-- ELSE:
+          |     |     +-- headers["traceparent"] = generate_root_w3c_traceparent()
+          |     |
+          |     |-- headers["x-tenant-id"] = tenant_id
+          |     |-- headers["x-correlation-id"] = correlation_id or generate_uuid4()
+          |     |-- headers["x-request-id"] = generate_uuid4()
+          |     +-- [PASS] Context isolated and W3C headers injected.
+          |
+          +-- STEP 4: HTTP Response Caching [StepCacheEval]
+          |     |
+          |     |-- cache_key = sha256(tenant_id + ":" + method + ":" + url + ":" + sha256(body))
+          |     |
+          |     +-- IF (config.cache_eval.enabled == True AND method in ["GET", "HEAD"]):
+          |     |     |-- cached_entry = cache_store.get(cache_key)
+          |     |     |
+          |     |     +-- IF (cached_entry is not None AND not cached_entry.is_expired()):
+          |     |     |     |-- [LOG INFO] "Cache HIT for key: " + cache_key
+          |     |     |     |-- [METRIC] Increment counter 'client.cache.hit'
+          |     |     |     +-- [RETURN] cached_entry.to_response(status_code=200, headers={"X-Cache": "HIT"})
+          |     |     |
+          |     |     +-- ELSE IF (cached_entry is not None AND cached_entry.is_within_stale_window()):
+          |     |     |     |-- [LOG INFO] "Stale cache HIT (revalidating in background): " + cache_key
+          |     |     |     |-- [ASYNC] asyncio.create_task(revalidate_cache_entry(cache_key, request))
+          |     |     |     +-- [RETURN] cached_entry.to_response(headers={"X-Cache": "STALE-HIT"})
+          |     |     |
+          |     |     +-- ELSE:
+          |     |           |-- [LOG DEBUG] "Cache MISS for key: " + cache_key
+          |     |           |-- [METRIC] Increment counter 'client.cache.miss'
+          |     |           +-- [PASS] Proceed to Singleflight.
+          |     |
+          |     +-- ELSE:
+          |           +-- [SKIP] Caching disabled or method non-cacheable. Proceed to Step 5.
+          |
+          +-- STEP 5: In-Flight Request Deduplication [StepSingleflight]
+          |     |
+          |     |-- await in_flight_lock.acquire()
+          |     |
+          |     +-- IF (leader_task := in_flight_registry.get(cache_key)) THEN:
+          |     |     |-- in_flight_lock.release()
+          |     |     |-- [LOG INFO] "Duplicate concurrent request detected. Registered as FOLLOWER on key: " + cache_key
+          |     |     |-- [METRIC] Increment counter 'client.singleflight.follower_joined'
+          |     |     |
+          |     |     |-- [WAIT] await leader_task.completion_event.wait(timeout=config.client.timeout_seconds)
+          |     |     |
+          |     |     +-- IF (leader_task.completion_event.is_set() == False) THEN:
+          |     |     |     |-- [LOG WARN] "Follower timed out awaiting singleflight leader task: " + cache_key
+          |     |     |     +-- [RAISE] SingleflightTimeoutException("Timed out waiting for leader task", status_code=504)
+          |     |     |
+          |     |     +-- ELSE IF (leader_task.exception is not None) THEN:
+          |     |     |     |-- [LOG WARN] "Singleflight leader failed. Re-raising leader exception on follower."
+          |     |     |     +-- [RE-RAISE] leader_task.exception (Mirrored outcome without redundant network I/O)
+          |     |     |
+          |     |     +-- ELSE:
+          |     |           |-- [METRIC] Increment counter 'client.singleflight.deduplicated_success'
+          |     |           +-- [RETURN] leader_task.response.clone(headers={"X-Singleflight": "FOLLOWER"})
+          |     |
+          |     +-- ELSE:
+          |           |-- in_flight_registry[cache_key] = current_task (Registered as LEADER)
+          |           |-- in_flight_lock.release()
+          |           +-- [LEADER PASS] Proceed as LEADER to Circuit Breaker.
+          |
+          +-- STEP 6: Circuit Breaker Evaluation [StepCircuitBreaker]
+          |     |
+          |     |-- state = circuit_breaker.get_state()
+          |     |
+          |     +-- IF (state == "OPEN") THEN:
+          |     |     |-- elapsed_since_trip = now() - circuit_breaker.tripped_timestamp
+          |     |     |
+          |     |     +-- IF (elapsed_since_trip >= config.circuit_breaker.recovery_timeout_seconds) THEN:
+          |     |     |     |-- circuit_breaker.transition_to("HALF-OPEN")
+          |     |     |     |-- [LOG INFO] "Recovery timeout elapsed (" + str(elapsed_since_trip) + "s). Entering HALF-OPEN probe state."
+          |     |     |     |-- [METRIC] Increment counter 'circuit_breaker.transition.half_open'
+          |     |     |     +-- [PASS] Allowed as trial probe request.
+          |     |     |
+          |     |     +-- ELSE:
+          |     |           |-- [LOG WARN] "Circuit is OPEN. Fast-failing outbound request without wire I/O."
+          |     |           |-- [METRIC] Increment counter 'circuit_breaker.fast_failure'
+          |     |           |
+          |     |           +-- IF (config.cache_eval.stale_if_error_seconds > 0 AND (stale := cache.get_stale(cache_key))):
+          |     |           |     |-- [LOG WARN] "Returning stale cache fallback during OPEN circuit state."
+          |     |           |     +-- [RETURN] stale.to_response(headers={"X-Cache": "STALE-CIRCUIT-DEGRADED"})
+          |     |           |
+          |     |           +-- ELSE:
+          |     |                 +-- [RAISE] CircuitBreakerOpenException("Circuit breaker OPEN", status_code=503)
+          |     |
+          |     +-- ELSE IF (state == "HALF-OPEN") THEN:
+          |     |     +-- IF (circuit_breaker.half_open_probes_in_flight >= config.circuit_breaker.half_open_requests) THEN:
+          |     |     |     |-- [LOG WARN] "Max HALF-OPEN probe quota saturated. Rejecting concurrent probe."
+          |     |     |     +-- [RAISE] CircuitBreakerOpenException("Max trial probes in-flight", status_code=503)
+          |     |     +-- ELSE:
+          |     |           |-- circuit_breaker.half_open_probes_in_flight += 1
+          |     |           +-- [PASS] Allowed as trial probe request.
+          |     |
+          |     +-- ELSE (state == "CLOSED"):
+          |           +-- [PASS] Downstream healthy. Proceed to Step 7.
+          |
+          +-- STEP 7: Token Bucket Rate Limiting [StepRateLimit]
+          |     |
+          |     +-- IF (config.rate_limit.enabled == True) THEN:
+          |     |     |-- token_acquired = token_bucket.consume(tenant_id=tenant_id, cost=1)
+          |     |     |
+          |     |     +-- IF (token_acquired == False) THEN:
+          |     |     |     |-- [LOG WARN] "Outbound rate limit threshold breached for tenant: " + tenant_id
+          |     |     |     |-- [METRIC] Increment counter 'client.rate_limit.rejected'
+          |     |     |     +-- [RAISE] RateLimitExceededException("Outbound rate limit exceeded. Retry later.", status_code=429)
+          |     |     |
+          |     |     +-- ELSE:
+          |     |           +-- [PASS] Rate limit token acquired. Proceed to Step 8.
+          |     |
+          |     +-- ELSE:
+          |           +-- [SKIP] Rate limiting bypassed by configuration.
+          |
+          +-- STEP 8: Bulkhead Admission Control [StepAdmissionControl]
+          |     |
+          |     |-- acquired = await semaphore.acquire_timeout(timeout=config.admission_control.queue_timeout_seconds)
+          |     |
+          |     +-- IF (acquired == False) THEN:
+          |     |     |-- [LOG CRITICAL] "Concurrency bulkhead saturated. Queue wait exceeded: " + str(queue_timeout) + "s"
+          |     |     |-- [METRIC] Increment counter 'client.admission.bulkhead_saturated'
+          |     |     +-- [RAISE] BulkheadRejectionException("Outbound admission bulkhead full", status_code=503)
+          |     |
+          |     +-- ELSE:
+          |           +-- [ACQUIRED] Bulkhead concurrency slot reserved. Proceed to Wire I/O.
+          |
+          +-- [WIRE I/O & EXPONENTIAL JITTER RETRY ENGINE]
+                |
+                +-- FOR attempt = 0 TO config.client.retries DO:
+                |     |
+                |     +-- TRY:
+                |     |     |-- dispatch_start = now()
+                |     |     |-- raw_response = await httpx_client.send(request, timeout=config.client.timeout_seconds)
+                |     |     |-- latency_ms = (now() - dispatch_start) * 1000
+                |     |     |-- [METRIC] Record timer 'client.http.request_duration', tags=[status=raw_response.status_code]
+                |     |     |
+                |     |     +-- IF (raw_response.status_code in [200, 201, 202, 204]) THEN:
+                |     |     |     |-- [STATUS 2xx OK] Downstream invocation successful!
+                |     |     |     |
+                |     |     |     +-- IF (circuit_breaker.state == "HALF-OPEN") THEN:
+                |     |     |     |     |-- circuit_breaker.record_probe_success()
+                |     |     |     |     +-- IF (circuit_breaker.consecutive_probe_successes >= config.circuit_breaker.half_open_requests):
+                |     |     |     |           |-- circuit_breaker.transition_to("CLOSED")
+                |     |     |     |           |-- [LOG INFO] "Circuit breaker self-healed. State restored to CLOSED."
+                |     |     |     |           +-- [METRIC] Increment counter 'circuit_breaker.transition.closed'
+                |     |     |     |
+                |     |     |     +-- ELSE:
+                |     |     |     |     +-- circuit_breaker.reset_failure_count()
+                |     |     |     |
+                |     |     |     +-- IF (config.cache_eval.enabled == True AND method in ["GET", "HEAD"]):
+                |     |     |     |     +-- cache_store.set(cache_key, raw_response, ttl=config.cache_eval.default_ttl_seconds)
+                |     |     |     |
+                |     |     |     +-- [BREAK RETRY LOOP] -> Proceed directly to Unwinding & Return.
+                |     |     |
+                |     |     +-- ELSE IF (raw_response.status_code in [400, 401, 403, 404, 422]) THEN:
+                |     |     |     |-- [STATUS 4xx CLIENT ERROR] Deterministic caller failure (non-transient).
+                |     |     |     |-- [LOG WARN] "Downstream returned non-retryable 4xx client error: " + str(raw_response.status_code)
+                |     |     |     |-- [ACTION] Do NOT retry! Do NOT increment circuit breaker failure count!
+                |     |     |     +-- [BREAK RETRY LOOP] -> Proceed directly to Unwinding & Return raw_response.
+                |     |     |
+                |     |     +-- ELSE IF (raw_response.status_code in config.client.retry_status_codes [429, 502, 503, 504]) THEN:
+                |     |           |-- [STATUS 5xx TRANSIENT ERROR] Downstream service unavailable or rate limited.
+                |     |           |-- circuit_breaker.record_failure()
+                |     |           |
+                |     |           +-- IF (circuit_breaker.consecutive_failures >= config.circuit_breaker.failure_threshold):
+                |     |           |     |-- circuit_breaker.transition_to("OPEN")
+                |     |           |     |-- [LOG CRITICAL] "Circuit breaker tripped to OPEN state (" + str(circuit_breaker.consecutive_failures) + " failures)"
+                |     |           |     +-- [METRIC] Increment counter 'circuit_breaker.transition.open'
+                |     |           |
+                |     |           +-- IF (attempt < config.client.retries) THEN:
+                |     |           |     |-- base_backoff = config.client.retry_backoff_factor * (2 ** attempt)
+                |     |           |     |-- jittered_sleep = uniform(0.5 * base_backoff, 1.5 * base_backoff)
+                |     |           |     |-- [LOG WARN] "Transient 5xx received. Retrying attempt " + str(attempt + 1) + " after " + str(jittered_sleep) + "s"
+                |     |           |     |-- [METRIC] Increment counter 'client.retry.attempt'
+                |     |           |     |-- await asyncio.sleep(jittered_sleep)
+                |     |           |     +-- [CONTINUE RETRY LOOP] (Proceed to next attempt)
+                |     |           |
+                |     |           +-- ELSE:
+                |     |                 |-- [LOG ERROR] "All retry attempts exhausted (" + str(config.client.retries) + "). Outbound call failed."
+                |     |                 |-- [EVENT] Kafka CloudEvent -> 'http.outbound.dlq.v1' (topic: call_failure_dlq)
+                |     |                 |-- [METRIC] Increment counter 'client.retry.exhausted'
+                |     |                 +-- [RAISE] DownstreamServiceUnavailableException(raw_response.text, status_code=raw_response.status_code)
+                |     |
+                |     +-- EXCEPT (httpx.TimeoutException, httpx.ConnectError, ssl.SSLError) AS net_err:
+                |           |-- [NETWORK TRANSPORT ERROR] Socket drop, timeout, or TLS handshake error: str(net_err)
+                |           |-- circuit_breaker.record_failure()
+                |           |
+                |           +-- IF (circuit_breaker.consecutive_failures >= config.circuit_breaker.failure_threshold):
+                |           |     |-- circuit_breaker.transition_to("OPEN")
+                |           |     |-- [LOG CRITICAL] "Circuit breaker tripped to OPEN following network failure."
+                |           |     +-- [METRIC] Increment counter 'circuit_breaker.transition.open'
+                |           |
+                |           +-- IF (attempt < config.client.retries) THEN:
+                |           |     |-- base_backoff = config.client.retry_backoff_factor * (2 ** attempt)
+                |           |     |-- jittered_sleep = uniform(0.5 * base_backoff, 1.5 * base_backoff)
+                |           |     |-- [LOG WARN] "Transport error on attempt " + str(attempt + 1) + ". Retrying after " + str(jittered_sleep) + "s"
+                |           |     |-- [METRIC] Increment counter 'client.retry.attempt'
+                |           |     |-- await asyncio.sleep(jittered_sleep)
+                |           |     +-- [CONTINUE RETRY LOOP]
+                |           |
+                |           +-- ELSE:
+                |                 |-- [LOG ERROR] "Network transport retries exhausted: " + str(net_err)
+                |                 |-- [EVENT] Kafka CloudEvent -> 'http.outbound.dlq.v1' (topic: call_failure_dlq)
+                |                 |-- [METRIC] Increment counter 'client.retry.exhausted'
+                |                 +-- [RAISE] RemoteHostUnreachableException(str(net_err))
+                |
+                +-- [GUARANTEED UNWINDING & CLEANUP (FINALLY BLOCK)]
+                      |
+                      |-- semaphore.release() [Bulkhead concurrency slot returned to pool]
+                      |
+                      +-- IF (current_task == leader_task) THEN:
+                      |     |-- in_flight_registry.pop(cache_key, None)
+                      |     |-- leader_task.response = raw_response
+                      |     |-- leader_task.exception = raised_exception
+                      |     +-- leader_task.completion_event.set() [Awakens all waiting follower tasks!]
+                      |
+                      +-- [RETURN] raw_response -> HttpFeatureOutboundAdapter -> FeatureDomainService
 ```
 
 #### 4.4.2 Mermaid Decision Flowchart

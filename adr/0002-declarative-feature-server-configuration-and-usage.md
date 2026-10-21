@@ -305,159 +305,174 @@ The following call stack traces an inbound client request from the Linux kernel 
 #### 4.4.1 Exhaustive IF/ELSE Branching & Loop ASCII Tree (All Paths Covered)
 
 ```text
-┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│                        SERVER INGRESS PIPELINE: EXHAUSTIVE IF/ELSE BRANCHING & LOOP ASCII TREE                         │
-└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
++------------------------------------------------------------------------------------------------------------------------+
+|                          SERVER INGRESS PIPELINE: EXHAUSTIVE IF/ELSE & LIFECYCLE DECISION TREE                         |
+|                       (All Network Stages, Middleware Interceptors, Bounds, and Error Paths Covered)                   |
++------------------------------------------------------------------------------------------------------------------------+
 
-▼ [INGRESS] Linux Kernel Socket receives TCP SYN on public_bind / admin_bind
-  │
-  ├─► STAGE 1: Kernel Socket & Connection Caps
-  │   │
-  │   ├── IF (current_open_connections >= limits.total_connection_cap [10,000]):
-  │   │   ├── ✖ LOG CRITICAL: "Global connection cap reached (10000). Rejecting TCP handshake."
-  │   │   └── 🛑 DROP: Kernel closes socket via TCP RST
-  │   │
-  │   ├── ELSE IF (connections_from_ip(peer_ip) >= limits.per_client_cap [100]):
-  │   │   ├── ✖ LOG WARN: "Per-client connection flood from IP: " + peer_ip
-  │   │   └── 🛑 DROP: Terminate connection via TCP RST
-  │   │
-  │   └── ELSE:
-  │       └── ✔ ADMIT: Connection admitted. Handshake completes.
-  │
-  ├─► STAGE 2: Uvicorn Codec & Slowloris Timeout Guards
-  │   │
-  │   ├── IF (header_read_time > server.header_read_timeout [10s]):
-  │   │   ├── ✖ LOG WARN: "Slowloris header trickle attack detected from " + peer_ip
-  │   │   └── 🛑 DROP: Socket terminated (HTTP 408 Request Timeout)
-  │   │
-  │   └── ELSE:
-  │       └── ✔ PASS: Complete HTTP request headers decoded into ASGI scope.
-  │
-  ├─► STAGE 3: Correlation & Telemetry Middleware (CorrelationAndTelemetryMiddleware)
-  │   │
-  │   ├── IF ("traceparent" IN request.headers):
-  │   │   └── active_trace_context = parse_w3c_traceparent(request.headers["traceparent"])
-  │   ├── ELSE:
-  │   │   └── active_trace_context = generate_new_128bit_trace_context()
-  │   ├── request.state.trace_id = active_trace_context.trace_id
-  │   ├── request.state.correlation_id = request.headers.get("x-correlation-id") or uuid4()
-  │   ├── request.state.request_id = uuid4()
-  │   └── ⚡ OPENTELEMETRY: Start server span with active trace context
-  │
-  ├─► STAGE 4: Peer IP Resolution & Trusted Proxy Verification
-  │   │
-  │   ├── IF (peer_ip IN server.trusted_proxies):
-  │   │   ├── real_client_ip = parse_x_forwarded_for(request.headers)
-  │   │   └── ✔ RESOLVED: Client IP verified via trusted reverse proxy.
-  │   └── ELSE:
-  │       ├── real_client_ip = peer_ip (Ignore spoofed X-Forwarded-For headers!)
-  │       └── 🔒 SECURED: Direct peer IP adopted.
-  │
-  ├─► STAGE 5: Global Admission Concurrency Bulkhead
-  │   │
-  │   ├── IF (in_flight_requests >= limits.global_admission_limit [1,000]):
-  │   │   ├── ✖ LOG CRITICAL: "Server ingress concurrency ceiling exceeded: 1000 requests"
-  │   │   ├── ⚡ KAFKA: Publish CloudEvent to 'server.ingress.audit.v1' (overload_shed)
-  │   │   └── 🛑 RAISE HTTPException(503, RFC_9457_ProblemDetails("Server Overloaded"))
-  │   └── ELSE:
-  │       ├── in_flight_requests += 1
-  │       └── ✔ ADMITTED: Concurrency slot reserved.
-  │
-  ├─► STAGE 6: Pre-Authentication IP Rate Limiting
-  │   │
-  │   ├── tokens_remaining = ip_token_bucket.consume(real_client_ip, tokens=1)
-  │   ├── IF (tokens_remaining == False):
-  │   │   ├── ✖ LOG WARN: "Pre-auth rate limit tripped for IP: " + real_client_ip
-  │   │   ├── ⚡ KAFKA: Publish CloudEvent to 'server.security.violations.v1'
-  │   │   └── 🛑 RAISE HTTPException(429, RFC_9457_ProblemDetails("IP Rate Limit Exceeded", retry_after=5))
-  │   └── ELSE:
-  │       └── ✔ PASS: Token consumed from client IP bucket.
-  │
-  ├─► STAGE 7: Authentication & Scope Verification
-  │   │
-  │   ├── IF (request.path IN PUBLIC_WHITELIST ["/healthz", "/readyz", "/livez", "/docs"]):
-  │   │   └── ⚡ SKIP: Public unauthenticated endpoint.
-  │   │
-  │   └── ELSE:
-  │       ├── token = extract_bearer_token(request.headers)
-  │       ├── IF (token == None OR not verify_jwt_signature(token, cached_jwks)):
-  │       │   ├── ✖ LOG WARN: "Missing or invalid cryptographic JWT signature"
-  │       │   └── 🛑 RAISE HTTPException(401, RFC_9457_ProblemDetails("Unauthorized"))
-  │       └── ELSE:
-  │           ├── request.state.tenant_id = token.claims["tenant_id"]
-  │           └── ✔ AUTHORIZED: Tenant identity bound to request context.
-  │
-  ├─► STAGE 8: Tenant Quota Token Bucket
-  │   │
-  │   ├── IF (tenant_id := request.state.tenant_id):
-  │   │   ├── tenant_tokens = tenant_quota_store.consume(tenant_id, 1)
-  │   │   ├── IF (tenant_tokens == False):
-  │   │   │   ├── ✖ LOG WARN: "Tenant quota capacity exhausted for tenant: " + tenant_id
-  │   │   │   └── 🛑 RAISE HTTPException(429, RFC_9457_ProblemDetails("Tenant Quota Exceeded", retry_after=10))
-  │   │   └── ELSE:
-  │   │       └── ✔ PASS: Tenant quota verified.
-  │   └── ELSE:
-  │       └── ⚡ SKIP: Unauthenticated route.
-  │
-  ├─► STAGE 9: Deadline Viability Verification
-  │   │
-  │   ├── IF ("grpc-timeout" IN request.headers):
-  │   │   ├── remaining_ms = parse_timeout(request.headers["grpc-timeout"]) - safety_margin_ms (50ms)
-  │   │   ├── IF (remaining_ms < min_budget_ms [10ms]):
-  │   │   │   ├── ✖ LOG WARN: "Request arrived with expired or unviable deadline budget: " + str(remaining_ms) + "ms"
-  │   │   │   └── 🛑 RAISE HTTPException(504, RFC_9457_ProblemDetails("Deadline Exceeded Prior to Execution"))
-  │   │   └── ELSE:
-  │   │       └── ✔ PASS: Viable deadline budget remaining.
-  │   └── ELSE:
-  │       └── ⚡ PASS: No caller deadline header specified.
-  │
-  ├─► STAGE 10: Payload Size Invariant Check
-  │   │
-  │   ├── content_length = int(request.headers.get("content-length", 0))
-  │   ├── IF (content_length > limits.max_body_bytes [10,485,760 bytes / 10 MiB]):
-  │   │   ├── ✖ LOG ALERT: "Payload exceeds hard limit: " + str(content_length) + " bytes"
-  │   │   └── 🛑 RAISE HTTPException(413, RFC_9457_ProblemDetails("Payload Too Large. Max size is 10 MiB."))
-  │   └── ELSE:
-  │       └── ✔ PASS: Request body within safety boundaries.
-  │
-  ├─► STAGE 11: Lifecycle Drain Verification (Probes)
-  │   │
-  │   ├── IF (request.path == "/readyz"):
-  │   │   ├── IF (app.state.is_draining == True):
-  │   │   │   ├── ✖ RETURN HTTP 503 Service Unavailable ("DRAINING") [Signals Kubernetes to remove Pod!]
-  │   │   └── ELSE:
-  │   │       └── ✔ RETURN HTTP 200 OK ("READY")
-  │   │
-  │   └── ELSE:
-  │       └── ✔ PROCEED to FastAPI Router dispatch.
-  │
-  ▼ [APPLICATION DELIVERY & BUSINESS EXECUTION]
-  │
-  ├── TRY:
-  │   ├── domain_response = await feature_endpoint_handler(request, validated_pydantic_body)
-  │   └── json_response = JSONResponse(content=domain_response, status_code=200)
-  │
-  ├── EXCEPT RequestValidationError as val_err:
-  │   ├── ✖ 422 Unprocessable Entity
-  │   └── json_response = format_rfc9457_validation_error(val_err, trace_id=request.state.trace_id)
-  │
-  ├── EXCEPT HTTPException as http_err:
-  │   ├── ✖ 4xx Client Error
-  │   └── json_response = format_rfc9457_http_error(http_err, trace_id=request.state.trace_id)
-  │
-  └── EXCEPT Exception as unhandled_err:
-      ├── ✖ 500 Internal Server Error: Log exception stack trace to stderr
-      ├── ⚡ KAFKA: Publish CloudEvent to 'server.security.violations.v1'
-      └── json_response = format_rfc9457_internal_error(trace_id=request.state.trace_id) [Stack trace SCRUBBED]
-  │
-  ▼ [EGRESS & RESPONSE UNWINDING]
-  │
-  ├── in_flight_requests -= 1 [Concurrency slot released]
-  ├── json_response.headers["x-correlation-id"] = request.state.correlation_id
-  ├── json_response.headers["x-request-id"] = str(request.state.request_id)
-  ├── json_response.headers["traceparent"] = format_w3c_traceparent(active_trace_context)
-  ├── opentelemetry.record_latency(route=request.path, status=json_response.status_code, duration=now() - start)
-  └── ✔ WIRE TRANSMIT: Uvicorn flushes HTTP response packets to client.
+[INGRESS] Linux Kernel Socket receives TCP SYN on public_bind / admin_bind
+   |
+   +--> STAGE 1: Kernel Socket & Connection Caps
+   |      |
+   |      +-- IF (current_open_connections >= limits.total_connection_cap [10,000]) THEN:
+   |      |     |-- [LOG CRITICAL] "Global connection cap reached (10000). Rejecting TCP handshake."
+   |      |     |-- [METRIC] Increment counter 'server.connection.global_cap_saturated'
+   |      |     +-- [DROP] Kernel closes socket via TCP RST
+   |      |
+   |      +-- ELSE IF (connections_from_ip(peer_ip) >= limits.per_client_cap [100]) THEN:
+   |      |     |-- [LOG WARN] "Per-client connection flood from IP: " + peer_ip
+   |      |     |-- [METRIC] Increment counter 'server.connection.client_flood_blocked'
+   |      |     +-- [DROP] Terminate connection via TCP RST
+   |      |
+   |      +-- ELSE:
+   |            +-- [ADMIT] Connection admitted. Handshake completes.
+   |
+   +--> STAGE 2: Uvicorn Codec & Slowloris Timeout Guards
+   |      |
+   |      +-- IF (header_read_time > server.header_read_timeout [10s]) THEN:
+   |      |     |-- [LOG WARN] "Slowloris header trickle attack detected from " + peer_ip
+   |      |     |-- [METRIC] Increment counter 'server.security.slowloris_aborted'
+   |      |     +-- [DROP] Socket terminated (HTTP 408 Request Timeout)
+   |      |
+   |      +-- ELSE:
+   |            +-- [PASS] Complete HTTP request headers decoded into ASGI scope.
+   |
+   +--> STAGE 3: Correlation & Telemetry Middleware [CorrelationAndTelemetryMiddleware]
+   |      |
+   |      +-- IF ("traceparent" in request.headers) THEN:
+   |      |     +-- active_trace_context = parse_w3c_traceparent(request.headers["traceparent"])
+   |      +-- ELSE:
+   |      |     +-- active_trace_context = generate_new_128bit_trace_context()
+   |      |
+   |      |-- request.state.trace_id = active_trace_context.trace_id
+   |      |-- request.state.correlation_id = request.headers.get("x-correlation-id") or generate_uuid4()
+   |      |-- request.state.request_id = generate_uuid4()
+   |      +-- [OPENTELEMETRY] Start server span with active trace context.
+   |
+   +--> STAGE 4: Peer IP Resolution & Trusted Proxy Verification
+   |      |
+   |      +-- IF (peer_ip in server.trusted_proxies) THEN:
+   |      |     |-- real_client_ip = parse_x_forwarded_for(request.headers)
+   |      |     +-- [RESOLVED] Client IP verified via trusted reverse proxy.
+   |      +-- ELSE:
+   |            |-- real_client_ip = peer_ip (Ignore spoofed X-Forwarded-For headers!)
+   |            +-- [SECURED] Direct peer IP adopted.
+   |
+   +--> STAGE 5: Global Admission Concurrency Bulkhead
+   |      |
+   |      +-- IF (in_flight_requests >= limits.global_admission_limit [1,000]) THEN:
+   |      |     |-- [LOG CRITICAL] "Server ingress concurrency ceiling exceeded: 1000 requests"
+   |      |     |-- [EVENT] Kafka CloudEvent -> 'server.ingress.audit.v1' (topic: overload_shed)
+   |      |     |-- [METRIC] Increment counter 'server.admission.overload_shed'
+   |      |     +-- [RAISE] HTTPException(503, RFC_9457_ProblemDetails("Server Overloaded"))
+   |      +-- ELSE:
+   |            |-- in_flight_requests += 1
+   |            +-- [ADMITTED] Concurrency slot reserved.
+   |
+   +--> STAGE 6: Pre-Authentication IP Rate Limiting
+   |      |
+   |      |-- tokens_remaining = ip_token_bucket.consume(real_client_ip, tokens=1)
+   |      +-- IF (tokens_remaining == False) THEN:
+   |      |     |-- [LOG WARN] "Pre-auth rate limit tripped for IP: " + real_client_ip
+   |      |     |-- [EVENT] Kafka CloudEvent -> 'server.security.violations.v1'
+   |      |     |-- [METRIC] Increment counter 'server.rate_limit.ip_rejected'
+   |      |     +-- [RAISE] HTTPException(429, RFC_9457_ProblemDetails("IP Rate Limit Exceeded", retry_after=5))
+   |      +-- ELSE:
+   |            +-- [PASS] Token consumed from client IP bucket.
+   |
+   +--> STAGE 7: Authentication & Scope Verification
+   |      |
+   |      +-- IF (request.path in PUBLIC_WHITELIST ["/healthz", "/readyz", "/livez", "/docs"]) THEN:
+   |      |     +-- [SKIP] Public unauthenticated endpoint.
+   |      |
+   |      +-- ELSE:
+   |            |-- token = extract_bearer_token(request.headers)
+   |            +-- IF (token is None or not verify_jwt_signature(token, cached_jwks)) THEN:
+   |            |     |-- [LOG WARN] "Missing or invalid cryptographic JWT signature"
+   |            |     |-- [METRIC] Increment counter 'server.auth.unauthorized'
+   |            |     +-- [RAISE] HTTPException(401, RFC_9457_ProblemDetails("Unauthorized"))
+   |            +-- ELSE:
+   |                  |-- request.state.tenant_id = token.claims["tenant_id"]
+   |                  +-- [AUTHORIZED] Tenant identity bound to request context.
+   |
+   +--> STAGE 8: Tenant Quota Token Bucket
+   |      |
+   |      +-- IF (tenant_id := request.state.tenant_id) THEN:
+   |      |     |-- tenant_tokens = tenant_quota_store.consume(tenant_id, 1)
+   |      |     +-- IF (tenant_tokens == False) THEN:
+   |      |     |     |-- [LOG WARN] "Tenant quota capacity exhausted for tenant: " + tenant_id
+   |      |     |     |-- [METRIC] Increment counter 'server.rate_limit.tenant_quota_exceeded'
+   |      |     |     +-- [RAISE] HTTPException(429, RFC_9457_ProblemDetails("Tenant Quota Exceeded", retry_after=10))
+   |      |     +-- ELSE:
+   |      |           +-- [PASS] Tenant quota verified.
+   |      +-- ELSE:
+   |            +-- [SKIP] Unauthenticated route.
+   |
+   +--> STAGE 9: Deadline Viability Verification
+   |      |
+   |      +-- IF ("grpc-timeout" in request.headers) THEN:
+   |      |     |-- remaining_ms = parse_timeout(request.headers["grpc-timeout"]) - safety_margin_ms (50ms)
+   |      |     +-- IF (remaining_ms < min_budget_ms [10ms]) THEN:
+   |      |     |     |-- [LOG WARN] "Request arrived with expired or unviable deadline budget: " + str(remaining_ms) + "ms"
+   |      |     |     |-- [METRIC] Increment counter 'server.deadline.expired_prior_to_dispatch'
+   |      |     |     +-- [RAISE] HTTPException(504, RFC_9457_ProblemDetails("Deadline Exceeded Prior to Execution"))
+   |      |     +-- ELSE:
+   |      |           +-- [PASS] Viable deadline budget remaining.
+   |      +-- ELSE:
+   |            +-- [SKIP] No caller deadline header specified.
+   |
+   +--> STAGE 10: Payload Size Invariant Check
+   |      |
+   |      |-- content_length = int(request.headers.get("content-length", 0))
+   |      +-- IF (content_length > limits.max_body_bytes [10,485,760 bytes / 10 MiB]) THEN:
+   |      |     |-- [LOG ALERT] "Payload exceeds hard limit: " + str(content_length) + " bytes"
+   |      |     |-- [METRIC] Increment counter 'server.limits.payload_too_large'
+   |      |     +-- [RAISE] HTTPException(413, RFC_9457_ProblemDetails("Payload Too Large. Max size is 10 MiB."))
+   |      +-- ELSE:
+   |            +-- [PASS] Request body within safety boundaries.
+   |
+   +--> STAGE 11: Lifecycle Drain Verification (Probes)
+   |      |
+   |      +-- IF (request.path == "/readyz") THEN:
+   |      |     +-- IF (app.state.is_draining == True) THEN:
+   |      |     |     |-- [LOG INFO] "Readiness check requested during drain -> Returning 503."
+   |      |     |     +-- [RETURN] HTTP 503 Service Unavailable ("DRAINING") [Signals Kubernetes to remove Pod!]
+   |      |     +-- ELSE:
+   |      |           +-- [RETURN] HTTP 200 OK ("READY")
+   |      |
+   |      +-- ELSE:
+   |            +-- [PROCEED] Proceed to FastAPI Router dispatch.
+   |
+   +--> [APPLICATION DELIVERY & BUSINESS EXECUTION]
+   |      |
+   |      +-- TRY:
+   |      |     |-- domain_response = await feature_endpoint_handler(request, validated_pydantic_body)
+   |      |     +-- json_response = JSONResponse(content=domain_response, status_code=200)
+   |      |
+   |      +-- EXCEPT RequestValidationError AS val_err:
+   |      |     |-- [ERROR 422] Unprocessable Entity
+   |      |     |-- [METRIC] Increment counter 'server.errors.validation'
+   |      |     +-- json_response = format_rfc9457_validation_error(val_err, trace_id=request.state.trace_id)
+   |      |
+   |      +-- EXCEPT HTTPException AS http_err:
+   |      |     |-- [ERROR 4xx] Client Error
+   |      |     |-- [METRIC] Increment counter 'server.errors.http_client'
+   |      |     +-- json_response = format_rfc9457_http_error(http_err, trace_id=request.state.trace_id)
+   |      |
+   |      +-- EXCEPT Exception AS unhandled_err:
+   |            |-- [ERROR 500] Internal Server Error: Log exception stack trace to stderr
+   |            |-- [EVENT] Kafka CloudEvent -> 'server.security.violations.v1'
+   |            |-- [METRIC] Increment counter 'server.errors.unhandled_500'
+   |            +-- json_response = format_rfc9457_internal_error(trace_id=request.state.trace_id) [Stack trace SCRUBBED]
+   |
+   +--> [EGRESS & RESPONSE UNWINDING]
+          |
+          |-- in_flight_requests -= 1 [Bulkhead concurrency slot released]
+          |-- json_response.headers["x-correlation-id"] = request.state.correlation_id
+          |-- json_response.headers["x-request-id"] = str(request.state.request_id)
+          |-- json_response.headers["traceparent"] = format_w3c_traceparent(active_trace_context)
+          |-- opentelemetry.record_latency(route=request.path, status=json_response.status_code, duration=now() - start)
+          +-- [WIRE TRANSMIT] Uvicorn flushes HTTP response packets to client.
 ```
 
 #### 4.4.2 Mermaid Decision Flowchart
