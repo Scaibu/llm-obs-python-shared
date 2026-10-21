@@ -709,17 +709,20 @@ Microservices in our distributed architecture operate on a non-overlapping, math
 - **Metrics Scraping (`METRICS_PORT`)**: Bound to `127.0.0.1` or internal cluster interfaces for Prometheus scraping.
 
 #### 1.2 Mathematical Port Triple Standard
-Every microservice or server feature in the monorepo is assigned a unique integer `SERVICE_INDEX` ($N \in [1, 899]$). The port triple is deterministically computed:
+Every microservice or server feature in the monorepo is assigned a unique integer `SERVICE_INDEX` ($N \in [1, 899]$). The port triple is deterministically computed via the linear partitioning formulas:
 
-$$\text{PUBLIC\_PORT} = 8000 + N$$
-$$\text{ADMIN\_PORT}  = 9000 + N$$
-$$\text{METRICS\_PORT} = 9100 + N$$
+```text
+PUBLIC_PORT  = 8000 + N
+ADMIN_PORT   = 9000 + N
+METRICS_PORT = 9100 + N
+```
 
 - **Partition Invariant**:
-  - Public Ingress Partition: `8001 – 8899`
-  - Admin Management Partition: `9001 – 9099`
-  - Prometheus Scraping Partition: `9101 – 9999`
-  Because each partition resides in a disjoint port range, port collisions between public and administrative endpoints are mathematically impossible.
+  - **Public Ingress Partition**: `8001 – 8899` (Formula: `8000 + N`)
+  - **Admin Management Partition**: `9001 – 9099` (Formula: `9000 + N`)
+  - **Prometheus Scraping Partition**: `9101 – 9999` (Formula: `9100 + N`)
+
+Because each partition resides in a strictly disjoint port range, port collisions between public ingress, administrative loopbacks, and metrics scraping endpoints are mathematically impossible across all services.
 
 #### 1.3 Port Allocation Standard & Discovery Script (For Any Future Service)
 
