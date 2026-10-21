@@ -860,13 +860,13 @@ The following architectural map illustrates how artifacts, parameters, and contr
 | Step | Component Name | Exact Inputs Given | Exact Outputs Produced | Direct Upstream Source | Direct Downstream Consumer | How to Use Individually (Standalone Mode) |
 |---|---|---|---|---|---|---|
 | **Step 1** | **Hexagonal Scaffolding** | `PACKAGE_NAME`, `FEATURE_NAME`, `FEATURE_DIR`, Monorepo Root | 6 subdirectories (`contracts/`, `domain/`, `infrastructure/`, `service/`, `tests/`) + PEP 420 `__init__.py` markers | Monorepo filesystem | Steps 2, 3, 4, 5, 6 | Run directory linter: `po file-search --root $FEATURE_DIR --tree` |
-| **Step 2** | **Declarative Config** | `FEATURE_PROFILE`, client timeouts, connection caps, retry counts, CB thresholds | Validated `${FEATURE_DIR}/http-config.yml` | Step 1 (directory) | Step 4 (Adapter client), Step 7 (fault test), Step 8 (reload) | Validate schema without code: `python3 -c "import yaml; yaml.safe_load(open('$FEATURE_DIR/http-config.yml'))"` |
-| **Step 3** | **Domain Port** | Method signatures, domain entity types (`payload: Dict`, `tenant_id: str`) | Abstract Base Class `FeatureOutboundPort(ABC)` with abstract methods | Step 1 (`infrastructure/ports/`) | Step 4 (Adapter implements it), Step 5 (Service accepts it) | Abstract contract verification: AST AST parser verifying 0 network imports |
+| **Step 2** | **Declarative Config** | `FEATURE_PROFILE`, client timeouts, connection caps, retry counts, CB thresholds | Validated `${FEATURE_DIR}/http-config.yml` | Step 1 (directory) | Step 4 (Adapter client), Step 7 (fault test), Step 8 (reload) | Validate schema without code: `python scripts/verify_http_config.py` |
+| **Step 3** | **Domain Port** | Method signatures, domain entity types (`payload: Dict`, `tenant_id: str`) | Abstract Base Class `FeatureOutboundPort(ABC)` with abstract methods | Step 1 (`infrastructure/ports/`) | Step 4 (Adapter implements it), Step 5 (Service accepts it) | Abstract contract verification: AST parser verifying 0 network imports via `scripts/verify_domain_port.py` |
 | **Step 4** | **HTTP Adapter** | Target `base_url`, `http-config.yml` (Step 2), `FeatureOutboundPort` (Step 3) | Concrete `HttpFeatureOutboundAdapter` class wrapping `ResilientHttpClient` | Step 2 (`http-config.yml`), Step 3 (Port contract) | Step 5 (Domain Service dependency injection) | Standalone script invoking remote endpoint directly without domain logic |
 | **Step 5** | **Domain Service** | Injected Port instance (Step 3/4), caller data (`data: Dict`, `tenant_id: str`) | Orchestrated domain result (`{"status": "COMPLETED", "result": raw}`) | Step 3 (Port contract), Step 4 (runtime adapter) | REST router / Temporal worker / CLI caller | Run business logic offline using an in-memory `StubPort` (no network needed) |
 | **Step 6** | **Unit Testing** | `FeatureDomainService` (Step 5), `unittest.mock.AsyncMock` port fixtures | Pytest assertions, test report (`pytest -v`), code coverage metrics | Step 3 (Port interface), Step 5 (Domain Service) | CI/CD build gate | Run `pytest <feature_dir>/tests/ -v` (executes in <50ms completely in-memory) |
 | **Step 7** | **Fault Injection** | `ResilientHttpClient` (Step 4), `httpx.MockTransport` error responses (503s) | Verified Circuit Breaker state changes (`CLOSED` -> `OPEN`), W3C trace validation | Step 2 (policies), Step 4 (resilient client) | SRE runbooks & resilience verification | Run chaos simulation script to test failure scenarios locally without live servers |
-| **Step 8** | **Live Hot-Reload** | Modified `http-config.yml` (Step 2), SIGHUP or `from_config()` invocation | Atomic swap of immutable config snapshot; zero request drops | Step 2 (`http-config.yml`), Step 4 (running client) | Production operations, live maintenance | Modify timeout via `sed` and verify reload via `from_config()` without process restart |
+| **Step 8** | **Live Hot-Reload** | Modified `http-config.yml` (Step 2), SIGHUP or `from_config()` invocation | Atomic swap of immutable config snapshot; zero request drops | Step 2 (`http-config.yml`), Step 4 (running client) | Production operations, live maintenance | Verify dynamic reload via `scripts/verify_hot_reload.py` without process restart |
 
 ---
 
@@ -912,30 +912,34 @@ rm -f "${MONOREPO_ROOT}/${PACKAGE_NAME}/src/features/__init__.py"
 #### 1.4 Automated Verification Script
 Run this script to verify that the directory structure complies with monorepo rules:
 
-```bash
-python3 -c "
+```python
+# scripts/verify_hexagonal_scaffolding.py
 import os
 import sys
 from pathlib import Path
 
-feature_dir = Path(os.environ['FEATURE_DIR'])
+feature_dir = Path(os.environ.get("FEATURE_DIR", "."))
 required_subdirs = [
-    'contracts', 'domain', 'infrastructure/ports',
-    'infrastructure/adapters', 'service', 'tests'
+    "contracts", "domain", "infrastructure/ports",
+    "infrastructure/adapters", "service", "tests"
 ]
 
 for subdir in required_subdirs:
     target = feature_dir / subdir
-    assert target.is_dir(), f'FAILED: Missing directory {target}'
-    init_file = target / '__init__.py'
-    assert init_file.is_file(), f'FAILED: Missing __init__.py in {target}'
+    assert target.is_dir(), f"FAILED: Missing directory {target}"
+    init_file = target / "__init__.py"
+    assert init_file.is_file(), f"FAILED: Missing __init__.py in {target}"
 
-package_name = os.environ['PACKAGE_NAME']
-assert not (Path(package_name) / 'src' / '__init__.py').exists(), 'FAILED: Stray src/__init__.py violates PEP 420!'
-assert not (Path(package_name) / 'src' / 'features' / '__init__.py').exists(), 'FAILED: Stray src/features/__init__.py violates PEP 420!'
+package_name = os.environ.get("PACKAGE_NAME", ".")
+assert not (Path(package_name) / "src" / "__init__.py").exists(), "FAILED: Stray src/__init__.py violates PEP 420!"
+assert not (Path(package_name) / "src" / "features" / "__init__.py").exists(), "FAILED: Stray src/features/__init__.py violates PEP 420!"
 
-print(f'>>> Step 1 SUCCESS: Hexagonal structure verified for {feature_dir}')
-"
+print(f">>> Step 1 SUCCESS: Hexagonal structure verified for {feature_dir}")
+```
+
+Run via:
+```bash
+python scripts/verify_hexagonal_scaffolding.py
 ```
 
 #### 1.5 Common Pitfalls & Troubleshooting
@@ -987,30 +991,176 @@ This guarantees:
 | `temporal_worker` | Temporal activity workers, Celery/async task workers | 2 Steps: `context_isolation`, `circuit_breaker` | Lean execution. Rate limiting, backoff, retries, and task bulkheads are managed natively by the Temporal engine. |
 | `internal_fast` | High-throughput intra-cluster RPC, daemon sidecars | 1 Step: `context_isolation` | Ultra-low latency (<0.5ms overhead). Bypasses caching and circuit breakers for trusted intra-cluster calls. |
 
-#### 2.3 Concrete YAML Templates
+#### 2.3 Concrete Declarative YAML Template & Inline Parameter Reference
 
-##### Profile A: `api_service` (REST Services)
+Target File: `${FEATURE_DIR}/http-config.yml`
+
+This single canonical configuration schema governs the HTTP client runtime. Every parameter is documented with its architectural meaning, default values, and profile-specific calibration (`api_service` vs `temporal_worker` vs `internal_fast`):
+
 ```yaml
+# ==============================================================================
+# DECLARATIVE HTTP PIPELINE CONFIGURATION: http-config.yml
+# ==============================================================================
+# Architectural Role:
+#   This file serves as the single immutable contract governing all outbound
+#   HTTP transport behavior for this feature domain. It completely decouples
+#   operational network tuning (timeouts, connection pools, circuit breakers,
+#   retries, and security firewalls) from the underlying Python domain logic.
+#
+# Profile Variations:
+#   - Profile A: api_service     (REST Ingress / User-Facing Services)
+#     * All 8 defensive pipeline steps active.
+#     * Strict security: input hardening and SSRF firewalls enabled.
+#     * Conservative concurrency and multi-tier retries with backoff.
+#   - Profile B: temporal_worker (Asynchronous Workflow Workers)
+#     * Lean 2-step pipeline: context_isolation, circuit_breaker.
+#     * Retries set to 0 (Temporal workflow engine manages retries natively).
+#     * Longer timeout (60s) for batch/async activity execution.
+#   - Profile C: internal_fast   (Cluster-Internal High-Speed RPC)
+#     * Ultra-low latency 1-step pipeline: context_isolation only.
+#     * Aggressive 5s timeout, 1s connect timeout, large connection pool (200).
+#     * Fast fail / single retry for intra-cluster east-west communication.
+# ==============================================================================
+
+# schema_version (string, required):
+#   Semantic contract version for the configuration schema. If breaking changes
+#   are introduced to the loader, this field enables deterministic schema
+#   migrations and backward compatibility assertions.
+#   Value: "1.0.0"
 schema_version: "1.0.0"
+
+# feature_name (string, required):
+#   Explicitly binds this configuration file to its parent domain feature folder.
+#   The loader asserts: assert cfg['feature_name'] == Path(__file__).resolve().parent.name
+#   to prevent accidental misplacement across features.
+#   Value: Target feature directory name (e.g., "target_feature", "score_composite")
 feature_name: "target_feature"
+
+# profile (enum, required):
+#   Selects the execution environment profile. Dictates which pipeline steps
+#   are loaded and how concurrency/retries are handled across process models.
+#   Values:
+#     - "api_service":     Full protection for REST APIs and ingress endpoints.
+#     - "temporal_worker": Lean execution for asynchronous workflow activity workers.
+#     - "internal_fast":   Ultra-low overhead for cluster-internal RPC microservices.
 profile: "api_service"
 
+# ------------------------------------------------------------------------------
+# Client Transport Engine Configuration
+# Controls low-level socket pools, timeouts, and transport-level resiliency.
+# ------------------------------------------------------------------------------
 client:
+  # timeout_seconds (float, required):
+  #   The absolute wall-clock timeout ceiling for a complete request/response
+  #   transaction. If the remote service does not return within this window,
+  #   the client cancels the task and raises httpx.TimeoutException.
+  #   Profile Values:
+  #     - api_service:     30.0s (Standard REST request budget)
+  #     - temporal_worker: 60.0s (Extended budget for background worker activities)
+  #     - internal_fast:    5.0s (Tight deadline for cluster-internal microservices)
   timeout_seconds: 30.0
-  connect_timeout_seconds: 5.0
-  max_connections: 100
-  max_keepalive_connections: 20
-  keepalive_expiry_seconds: 30.0
-  verify_ssl: true
-  retries: 3
-  retry_backoff_factor: 0.5
-  retry_status_codes:
-    - 429
-    - 502
-    - 503
-    - 504
 
+  # connect_timeout_seconds (float, required):
+  #   The maximum duration allocated for the initial TCP 3-way handshake and
+  #   TLS 1.3 ALPN negotiation. Prevents hanging worker threads when a downstream
+  #   host drops packets or blackholes traffic.
+  #   Profile Values:
+  #     - api_service:     5.0s (Standard internet/cross-AZ handshake)
+  #     - temporal_worker: 5.0s (Standard)
+  #     - internal_fast:   1.0s (Internal LAN/VPC cluster handshake)
+  connect_timeout_seconds: 5.0
+
+  # max_connections (integer, required):
+  #   The hard ceiling of open socket connections permitted in this client's
+  #   connection pool. Prevents file descriptor exhaustion (EMFILE) under load.
+  #   Profile Values:
+  #     - api_service:     100 (Standard concurrency cap per feature)
+  #     - temporal_worker:  50 (Conservative pool for worker threads)
+  #     - internal_fast:   200 (High-throughput pool for RPC multiplexing)
+  max_connections: 100
+
+  # max_keepalive_connections (integer, required):
+  #   Number of idle TCP connections retained in the pool for socket reuse.
+  #   Reusing connections saves ~35ms per request by avoiding repeated TCP handshakes
+  #   and TLS renegotiations.
+  #   Profile Values:
+  #     - api_service:     20 (Standard idle pool size)
+  #     - temporal_worker: 10 (Worker idle pool size)
+  #     - internal_fast:   50 (Large idle pool for bursty RPC traffic)
+  max_keepalive_connections: 20
+
+  # keepalive_expiry_seconds (float, required):
+  #   Maximum time an idle socket remains alive in the pool before being proactively
+  #   closed. Must be set lower than the upstream load balancer's idle timeout (typically
+  #   60s) to eliminate race conditions where the client transmits on a socket just as
+  #   the load balancer tears it down (RemoteProtocolError).
+  #   Profile Values:
+  #     - api_service:     30.0s
+  #     - temporal_worker: 45.0s
+  #     - internal_fast:   60.0s
+  keepalive_expiry_seconds: 30.0
+
+  # verify_ssl (boolean, required):
+  #   Enforces strict X.509 certificate validation and CA chain verification.
+  #   Disabling this in staging or production is a critical vulnerability that permits
+  #   Man-in-the-Middle (MitM) traffic interception.
+  #   Value: true (Mandatory across all profiles)
+  verify_ssl: true
+
+  # retries (integer, required):
+  #   Number of automatic retry attempts executed on transient errors.
+  #   In Temporal workers, this must be 0 because Temporal's activity execution
+  #   engine manages retries natively; nested retries cause exponential thundering herds.
+  #   Profile Values:
+  #     - api_service:     3 (Automatic transient recovery)
+  #     - temporal_worker: 0 (Delegated entirely to Temporal activity retry policy)
+  #     - internal_fast:   1 (Single fast retry before failing fast)
+  retries: 3
+
+  # retry_backoff_factor (float, required):
+  #   Multiplier for exponential backoff with full jitter:
+  #     sleep = backoff * (2 ** attempt) * rand(0.5, 1.5)
+  #   Spreads retried requests randomly over time to prevent thundering herds from
+  #   overwhelming recovering downstream services.
+  #   Profile Values:
+  #     - api_service:     0.5
+  #     - temporal_worker: 0.0 (No retries)
+  #     - internal_fast:   0.1 (Rapid micro-backoff)
+  retry_backoff_factor: 0.5
+
+  # retry_status_codes (list of integers, required):
+  #   HTTP status codes eligible for automated retries. Idempotent errors like
+  #   Bad Gateway (502) and Gateway Timeout (504) are retried; client errors like
+  #   400, 401, 403, and 422 fail fast without retrying.
+  #   Values: [429, 502, 503, 504]
+  retry_status_codes:
+    - 429  # Too Many Requests (Rate limit / throttle backoff)
+    - 502  # Bad Gateway (Downstream proxy / container restart)
+    - 503  # Service Unavailable (Downstream temporary overload)
+    - 504  # Gateway Timeout (Downstream upstream timeout)
+
+# ------------------------------------------------------------------------------
+# Composable Interceptor Pipeline
+# Steps execute strictly in the declared sequence.
+# ------------------------------------------------------------------------------
 pipeline:
+  # steps (list of strings, required):
+  #   Ordered list of active interceptor steps.
+  #   Profile Configurations:
+  #     - api_service:
+  #         - input_hardening    # RFC 7493 I-JSON depth cap & CRLF header scrub
+  #         - ssrf_validation    # DNS resolver blocking private IPs & metadata
+  #         - context_isolation  # W3C traceparent & tenant context propagation
+  #         - cache_eval         # RFC 9111 HTTP response cache & stale-if-error
+  #         - singleflight       # Concurrent in-flight request deduplication
+  #         - circuit_breaker    # Sliding window failure tracking
+  #         - rate_limit         # Per-tenant token bucket rate limiting
+  #         - admission_control  # Bulkhead concurrency queue limit
+  #     - temporal_worker:
+  #         - context_isolation  # Propagate workflow trace and tenant context
+  #         - circuit_breaker    # Fast-fail when target cluster is down
+  #     - internal_fast:
+  #         - context_isolation  # Distributed trace context propagation only
   steps:
     - input_hardening
     - ssrf_validation
@@ -1021,281 +1171,119 @@ pipeline:
     - rate_limit
     - admission_control
 
+  # circuit_breaker:
+  #   Automated fault isolation preventing cascading failures across services.
+  #   Active in: api_service, temporal_worker
   circuit_breaker:
+    # failure_threshold (integer):
+    #   Number of consecutive 5xx failures or timeouts required to trip the circuit
+    #   from CLOSED to OPEN.
+    #   Profile Values: 5 (api_service) | 5 (temporal_worker)
     failure_threshold: 5
+
+    # recovery_timeout_seconds (float):
+    #   The quiet period in seconds that the circuit remains OPEN. During this interval,
+    #   all outbound calls fail fast immediately without touching the network, allowing
+    #   downstream dependencies time to recover.
+    #   Profile Values: 30.0s (api_service) | 30.0s (temporal_worker)
     recovery_timeout_seconds: 30.0
+
+    # half_open_requests (integer):
+    #   Number of successful trial probe requests required in HALF-OPEN state to verify
+    #   downstream recovery before fully healing the circuit back to CLOSED.
+    #   Profile Values: 3 (api_service) | 2 (temporal_worker)
     half_open_requests: 3
 
+  # rate_limit:
+  #   Token bucket rate limiter preventing outbound traffic from overwhelming downstreams.
+  #   Active in: api_service
   rate_limit:
+    # requests_per_second (integer):
+    #   Token bucket refill rate per second. Ensures the client never exceeds downstream SLAs.
     requests_per_second: 100
+
+    # burst (integer):
+    #   Maximum token bucket capacity. Allows transient bursts while maintaining
+    #   long-term throughput at the configured requests_per_second.
     burst: 200
 
+  # cache_eval:
+  #   RFC 9111 compliant response caching with stale-if-error fallback.
+  #   Active in: api_service (Set enabled: false for temporal_worker and internal_fast)
   cache_eval:
+    # enabled (boolean):
+    #   Toggles RFC 9111 HTTP response caching. When enabled, identical GET evaluations
+    #   return immediately from cache without network traversal.
     enabled: true
+
+    # default_ttl_seconds (integer):
+    #   Lifetime of cached response records in seconds.
     default_ttl_seconds: 60
+
+    # stale_if_error_seconds (float):
+    #   If downstream returns 5xx or circuit is open, the client serves stale cached data
+    #   up to 300 seconds old rather than returning an error (graceful degradation).
     stale_if_error_seconds: 300.0
 
+  # security:
+  #   Transport-level attack mitigation firewalls.
+  #   Active in: api_service (Disabled in temporal_worker and internal_fast)
   security:
+    # input_hardening (boolean):
+    #   Activates header sanitization (blocking \r\n CRLF characters to prevent HTTP
+    #   response splitting) and caps JSON nesting depth to 20 levels to stop parser recursion attacks.
+    #   Profile Values: true (api_service) | false (temporal_worker, internal_fast)
     input_hardening: true
+
+    # ssrf_validation (boolean):
+    #   Performs synchronous DNS resolution and enforces an IP firewall blocking loopback
+    #   (127.0.0.0/8), RFC 1918 private subnets (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16),
+    #   and cloud metadata endpoints (169.254.169.254).
+    #   Profile Values: true (api_service) | false (temporal_worker, internal_fast)
     ssrf_validation: true
 ```
 
-##### Profile B: `temporal_worker` (Asynchronous Workflow Workers)
-```yaml
-schema_version: "1.0.0"
-feature_name: "target_feature"
-profile: "temporal_worker"
-
-client:
-  timeout_seconds: 60.0
-  connect_timeout_seconds: 5.0
-  max_connections: 50
-  max_keepalive_connections: 10
-  keepalive_expiry_seconds: 45.0
-  verify_ssl: true
-  retries: 0
-  retry_backoff_factor: 0.0
-
-pipeline:
-  steps:
-    - context_isolation
-    - circuit_breaker
-
-  circuit_breaker:
-    failure_threshold: 5
-    recovery_timeout_seconds: 30.0
-    half_open_requests: 2
-
-  security:
-    input_hardening: false
-    ssrf_validation: false
-```
-
-##### Profile C: `internal_fast` (Cluster-Internal High-Speed RPC)
-```yaml
-schema_version: "1.0.0"
-feature_name: "target_feature"
-profile: "internal_fast"
-
-client:
-  timeout_seconds: 5.0
-  connect_timeout_seconds: 1.0
-  max_connections: 200
-  max_keepalive_connections: 50
-  keepalive_expiry_seconds: 60.0
-  verify_ssl: true
-  retries: 1
-  retry_backoff_factor: 0.1
-
-pipeline:
-  steps:
-    - context_isolation
-
-  security:
-    input_hardening: false
-    ssrf_validation: false
-```
-
-#### 2.4 In-Depth Parameter Reference & Architectural Meaning (Line by Line)
-
-Every key in `http-config.yml` controls a critical runtime invariant of the client pipeline. Below is the exhaustive parameter-by-parameter breakdown:
-
-1. **`schema_version` (string, required)**:
-   - *Value*: `"1.0.0"`
-   - *Meaning*: Semantic contract version for the configuration schema. If breaking changes are introduced to the loader, this field enables deterministic schema migrations and backward compatibility assertions.
-
-2. **`feature_name` (string, required)**:
-   - *Value*: `"${FEATURE_NAME}"` (e.g., `score_composite`)
-   - *Meaning*: Explicitly binds this configuration file to its parent domain feature folder. The loader asserts `assert cfg['feature_name'] == Path(__file__).resolve().parent.name` to prevent accidental misplacement.
-
-3. **`profile` (enum, required)**:
-   - *Value*: `"api_service"` | `"temporal_worker"` | `"internal_fast"`
-   - *Meaning*: Selects the execution environment profile. Dictates which pipeline steps are loaded and how concurrency/retries are handled across different process models.
-
-4. **`client.timeout_seconds` (float, required)**:
-   - *Value*: `30.0` (API) | `60.0` (Worker) | `5.0` (Internal)
-   - *Meaning*: The absolute wall-clock timeout ceiling for a complete request/response transaction. If the remote service does not return within this window, the client cancels the task and raises `httpx.TimeoutException`.
-
-5. **`client.connect_timeout_seconds` (float, required)**:
-   - *Value*: `5.0` (standard) | `1.0` (internal RPC)
-   - *Meaning*: The maximum duration allocated for the initial TCP 3-way handshake and TLS 1.3 ALPN negotiation. Prevents hanging worker threads when a downstream host drops packets or blackholes traffic.
-
-6. **`client.max_connections` (integer, required)**:
-   - *Value*: `100` (standard) | `200` (internal)
-   - *Meaning*: The hard ceiling of open socket connections permitted in this client's connection pool. Prevents file descriptor exhaustion (`EMFILE: Too many open files`) under heavy load spikes.
-
-7. **`client.max_keepalive_connections` (integer, required)**:
-   - *Value*: `20` (standard) | `50` (internal)
-   - *Meaning*: Number of idle TCP connections retained in the pool for socket reuse. Reusing connections saves ~35ms per request by avoiding repeated TCP handshakes and TLS renegotiations.
-
-8. **`client.keepalive_expiry_seconds` (float, required)**:
-   - *Value*: `30.0` (must be shorter than upstream load balancer idle timeout)
-   - *Meaning*: Maximum time an idle socket remains alive in the pool before being proactively closed. Setting this lower than the load balancer's idle timeout (typically 60s) eliminates race conditions where the client transmits on a socket just as the load balancer tears it down (`RemoteProtocolError`).
-
-9. **`client.verify_ssl` (boolean, required)**:
-   - *Value*: `true`
-   - *Meaning*: Enforces strict X.509 certificate validation and CA chain verification. Disabling this in staging or production is a critical vulnerability that permits Man-in-the-Middle (MitM) traffic interception.
-
-10. **`client.retries` (integer, required)**:
-    - *Value*: `3` (for REST APIs) | `0` (for Temporal workers)
-    - *Meaning*: Number of automatic retry attempts executed on transient errors. In Temporal workers, this must be `0` because Temporal's activity execution engine manages retries natively; nested retries cause exponential thundering herds.
-
-11. **`client.retry_backoff_factor` (float, required)**:
-    - *Value*: `0.5`
-    - *Meaning*: Multiplier for exponential backoff with full jitter ($t = \text{backoff} \times 2^{\text{attempt}} \times \text{rand}(0, 1)$). Spreads retried requests randomly over time to prevent thundering herds from overwhelming recovering downstream services.
-
-12. **`client.retry_status_codes` (list of integers, required)**:
-    - *Value*: `[429, 502, 503, 504]`
-    - *Meaning*: HTTP status codes eligible for automated retries. Idempotent errors like Bad Gateway (502) and Gateway Timeout (504) are retried; client errors like 400, 401, 403, and 422 fail fast without retrying.
-
-13. **`pipeline.steps` (list of strings, required)**:
-    - *Value*: Ordered list of active interceptor steps (e.g. `[input_hardening, ssrf_validation, context_isolation, cache_eval, singleflight, circuit_breaker, rate_limit, admission_control]`).
-    - *Meaning*: Explicitly defines the interceptor execution chain. Steps execute strictly in the declared order.
-
-14. **`pipeline.circuit_breaker.failure_threshold` (integer)**:
-    - *Value*: `5`
-    - *Meaning*: Number of consecutive 5xx failures or timeouts required to trip the circuit from `CLOSED` to `OPEN`.
-
-15. **`pipeline.circuit_breaker.recovery_timeout_seconds` (float)**:
-    - *Value*: `30.0`
-    - *Meaning*: The quiet period in seconds that the circuit remains `OPEN`. During this interval, all outbound calls fail fast immediately without touching the network, allowing downstream dependencies time to recover.
-
-16. **`pipeline.circuit_breaker.half_open_requests` (integer)**:
-    - *Value*: `3`
-    - *Meaning*: Number of successful trial probe requests required in `HALF-OPEN` state to verify downstream recovery before fully healing the circuit back to `CLOSED`.
-
-17. **`pipeline.rate_limit.requests_per_second` (integer)**:
-    - *Value*: `100`
-    - *Meaning*: Token bucket refill rate per second. Ensures the client never exceeds downstream service level agreements (SLAs).
-
-18. **`pipeline.rate_limit.burst` (integer)**:
-    - *Value*: `200`
-    - *Meaning*: Maximum token bucket capacity. Allows transient bursts up to 200 requests while maintaining long-term throughput at 100 req/s.
-
-19. **`pipeline.cache_eval.enabled` (boolean)**:
-    - *Value*: `true` | `false`
-    - *Meaning*: Toggles RFC 9111 HTTP response caching. When enabled, identical GET/POST evaluations return immediately from cache.
-
-20. **`pipeline.cache_eval.default_ttl_seconds` (integer)**:
-    - *Value*: `60`
-    - *Meaning*: Lifetime of cached response records in seconds.
-
-21. **`pipeline.cache_eval.stale_if_error_seconds` (float)**:
-    - *Value*: `300.0` (5 minutes)
-    - *Meaning*: If the downstream service is down (5xx or circuit open), the client serves stale cached data up to 300 seconds old rather than returning an error to the user (graceful degradation).
-
-22. **`pipeline.security.input_hardening` (boolean)**:
-    - *Value*: `true`
-    - *Meaning*: Activates header sanitization (blocking `\r\n` CRLF characters to prevent HTTP response splitting) and caps JSON nesting depth to 20 levels to stop parser recursion attacks.
-
-23. **`pipeline.security.ssrf_validation` (boolean)**:
-    - *Value*: `true`
-    - *Meaning*: Performs synchronous DNS resolution and enforces an IP firewall blocking loopback (`127.0.0.0/8`), RFC 1918 private subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), and AWS/GCP cloud metadata (`169.254.169.254`).
-
 ---
 
-#### 2.5 Step-by-Step Authoring Command
-Execute this parameterized shell command to write the configuration file based on `$FEATURE_PROFILE`:
-
-```bash
-cat << EOF > "${FEATURE_DIR}/http-config.yml"
-schema_version: "1.0.0"
-feature_name: "${FEATURE_NAME}"
-profile: "${FEATURE_PROFILE}"
-
-client:
-  timeout_seconds: $( [ "${FEATURE_PROFILE}" = "temporal_worker" ] && echo "60.0" || ( [ "${FEATURE_PROFILE}" = "internal_fast" ] && echo "5.0" || echo "30.0" ) )
-  connect_timeout_seconds: $( [ "${FEATURE_PROFILE}" = "internal_fast" ] && echo "1.0" || echo "5.0" )
-  max_connections: $( [ "${FEATURE_PROFILE}" = "internal_fast" ] && echo "200" || echo "100" )
-  max_keepalive_connections: 20
-  keepalive_expiry_seconds: 30.0
-  verify_ssl: true
-  retries: $( [ "${FEATURE_PROFILE}" = "temporal_worker" ] && echo "0" || ( [ "${FEATURE_PROFILE}" = "internal_fast" ] && echo "1" || echo "3" ) )
-  retry_backoff_factor: 0.5
-  retry_status_codes:
-    - 429
-    - 502
-    - 503
-    - 504
-
-pipeline:
-  steps:
-$( [ "${FEATURE_PROFILE}" = "api_service" ] && cat << 'STEPS'
-    - input_hardening
-    - ssrf_validation
-    - context_isolation
-    - cache_eval
-    - singleflight
-    - circuit_breaker
-    - rate_limit
-    - admission_control
-STEPS
-)
-$( [ "${FEATURE_PROFILE}" = "temporal_worker" ] && cat << 'STEPS'
-    - context_isolation
-    - circuit_breaker
-STEPS
-)
-$( [ "${FEATURE_PROFILE}" = "internal_fast" ] && cat << 'STEPS'
-    - context_isolation
-STEPS
-)
-
-  circuit_breaker:
-    failure_threshold: 5
-    recovery_timeout_seconds: 30.0
-    half_open_requests: 3
-
-  rate_limit:
-    requests_per_second: 100
-    burst: 200
-
-  cache_eval:
-    enabled: true
-    default_ttl_seconds: 60
-    stale_if_error_seconds: 300.0
-
-  security:
-    input_hardening: $( [ "${FEATURE_PROFILE}" = "api_service" ] && echo "true" || echo "false" )
-    ssrf_validation: $( [ "${FEATURE_PROFILE}" = "api_service" ] && echo "true" || echo "false" )
-EOF
-```
-
-#### 2.5 Automated Verification Script
+#### 2.4 Automated Verification Script
 Run this script to validate YAML syntax and profile constraints:
 
-```bash
-python3 -c "
+```python
+# scripts/verify_http_config.py
 import os
 import yaml
 from pathlib import Path
 
-config_path = Path(os.environ['FEATURE_DIR']) / 'http-config.yml'
-assert config_path.is_file(), f'FAILED: {config_path} does not exist'
+config_path = Path(os.environ.get("FEATURE_DIR", ".")) / "http-config.yml"
+assert config_path.is_file(), f"FAILED: {config_path} does not exist"
 
 with open(config_path) as f:
     cfg = yaml.safe_load(f)
 
-assert cfg['schema_version'] == '1.0.0', 'Invalid schema_version'
-assert cfg['feature_name'] == os.environ['FEATURE_NAME'], 'feature_name does not match directory name'
-assert cfg['profile'] in ['api_service', 'temporal_worker', 'internal_fast'], 'Invalid profile'
+assert cfg["schema_version"] == "1.0.0", "Invalid schema_version"
+assert cfg["feature_name"] == os.environ.get("FEATURE_NAME", cfg["feature_name"]), "feature_name mismatch"
+assert cfg["profile"] in ["api_service", "temporal_worker", "internal_fast"], "Invalid profile"
 
-profile = cfg['profile']
-steps = cfg['pipeline']['steps']
+profile = cfg["profile"]
+steps = cfg["pipeline"]["steps"]
 
-if profile == 'api_service':
-    assert len(steps) == 8, f'api_service profile requires 8 steps, got {len(steps)}'
-elif profile == 'temporal_worker':
-    assert steps == ['context_isolation', 'circuit_breaker'], f'temporal_worker profile steps mismatch: {steps}'
-elif profile == 'internal_fast':
-    assert steps == ['context_isolation'], f'internal_fast profile steps mismatch: {steps}'
+if profile == "api_service":
+    assert len(steps) == 8, f"api_service profile requires 8 steps, got {len(steps)}"
+elif profile == "temporal_worker":
+    assert steps == ["context_isolation", "circuit_breaker"], f"temporal_worker profile steps mismatch: {steps}"
+elif profile == "internal_fast":
+    assert steps == ["context_isolation"], f"internal_fast profile steps mismatch: {steps}"
 
-assert cfg['client']['timeout_seconds'] > 0.0, 'timeout_seconds must be positive'
-print(f'>>> Step 2 SUCCESS: http-config.yml validated for profile [{profile}]')
-"
+assert cfg["client"]["timeout_seconds"] > 0.0, "timeout_seconds must be positive"
+print(f">>> Step 2 SUCCESS: http-config.yml validated for profile [{profile}]")
 ```
 
-#### 2.6 Input/Output, Interconnection & Standalone Usage Reference
+Run via:
+```bash
+python scripts/verify_http_config.py
+```
+
+#### 2.5 Input/Output, Interconnection & Standalone Usage Reference
 
 - **Inputs Given**:
   - `FEATURE_NAME`: Target feature identifier.
@@ -1309,13 +1297,13 @@ print(f'>>> Step 2 SUCCESS: http-config.yml validated for profile [{profile}]')
   - Downstream: Read directly by Step 4's `ResilientHttpClient.from_config()`. The adapter uses this YAML to configure all timeouts, connection pools, and interceptors. Also verified under fault conditions in Step 7 and dynamically hot-reloaded in Step 8.
 - **How to Use Individually (Standalone Mode)**:
   - Can be written, validated, linted, or tuned completely standalone without running any application code or having microservices started:
-    ```bash
-    python3 -c "
+    ```python
     import yaml
-    with open('${FEATURE_DIR}/http-config.yml') as f:
+
+    with open("http-config.yml") as f:
         cfg = yaml.safe_load(f)
-    print('Config validated! Profile:', cfg['profile'], '| Steps:', cfg['pipeline']['steps'])
-    "
+
+    print("Config validated! Profile:", cfg["profile"], "| Steps:", cfg["pipeline"]["steps"])
     ```
 
 ---
@@ -1328,10 +1316,10 @@ The Outbound Port is an abstract interface using standard library `abc.ABC`. It 
 - The port accepts pure domain entities or primitives (`str`, `dict`, `pydantic.BaseModel`) and returns domain models.
 
 #### 3.2 Concrete Universal Port Implementation
-Generate the abstract port file `${FEATURE_DIR}/infrastructure/ports/${FEATURE_NAME}_port.py`:
 
-```bash
-cat << 'EOF' > "${FEATURE_DIR}/infrastructure/ports/${FEATURE_NAME}_port.py"
+Target File: `${FEATURE_DIR}/infrastructure/ports/${FEATURE_NAME}_port.py`
+
+```python
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
 
@@ -1345,34 +1333,37 @@ class FeatureOutboundPort(ABC):
     ) -> Dict[str, Any]:
         """Execute the feature's outbound remote operation."""
         pass
-EOF
 ```
 
 #### 3.3 Automated Verification Script
 Run this script to assert that the port is abstract and has zero network coupling:
 
-```bash
-python3 -c "
-import os
+```python
+# scripts/verify_domain_port.py
 import ast
+import os
 from pathlib import Path
 
-port_path = Path(os.environ['FEATURE_DIR']) / 'infrastructure' / 'ports' / f\"{os.environ['FEATURE_NAME']}_port.py\"
-assert port_path.is_file(), f'FAILED: {port_path} not found'
+port_path = Path(os.environ.get("FEATURE_DIR", ".")) / "infrastructure" / "ports" / f"{os.environ.get('FEATURE_NAME', 'target')}_port.py"
+assert port_path.is_file(), f"FAILED: {port_path} not found"
 
 with open(port_path) as f:
     tree = ast.parse(f.read())
 
-forbidden_modules = {'httpx', 'requests', 'urllib', 'aiohttp'}
+forbidden_modules = {"httpx", "requests", "urllib", "aiohttp"}
 for node in ast.walk(tree):
     if isinstance(node, ast.Import):
         for alias in node.names:
-            assert alias.name not in forbidden_modules, f'VIOLATION: Forbidden import {alias.name} in Port interface!'
+            assert alias.name not in forbidden_modules, f"VIOLATION: Forbidden import {alias.name} in Port interface!"
     elif isinstance(node, ast.ImportFrom):
-        assert node.module not in forbidden_modules, f'VIOLATION: Forbidden import from {node.module} in Port interface!'
+        assert node.module not in forbidden_modules, f"VIOLATION: Forbidden import from {node.module} in Port interface!"
 
-print(f'>>> Step 3 SUCCESS: Port interface verified pure of networking imports')
-"
+print(">>> Step 3 SUCCESS: Port interface verified pure of networking imports")
+```
+
+Run via:
+```bash
+python scripts/verify_domain_port.py
 ```
 
 #### 3.4 Input/Output, Interconnection & Standalone Usage Reference
@@ -1392,18 +1383,19 @@ print(f'>>> Step 3 SUCCESS: Port interface verified pure of networking imports')
 - **How to Use Individually (Standalone Mode)**:
   - Can be defined and verified completely independently of HTTP clients, libraries, or network infrastructure.
   - Allows multiple interchangeable implementations: an HTTP adapter, a gRPC adapter, a Kafka event adapter, or an in-memory stub can all implement this same port without modifying domain code.
-  - Standalone verification command (AST parser asserting zero networking imports):
-    ```bash
-    python3 -c "
+  - Standalone verification script (AST parser asserting zero networking imports):
+    ```python
     import ast
-    with open('${FEATURE_DIR}/infrastructure/ports/${FEATURE_NAME}_port.py') as f:
+
+    with open("infrastructure/ports/feature_port.py") as f:
         tree = ast.parse(f.read())
+
     for node in ast.walk(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
-            mod = getattr(node, 'module', '') or [a.name for a in node.names][0]
-            assert mod not in {'httpx', 'requests', 'urllib', 'aiohttp'}, f'Forbidden import {mod}'
-    print('Port is 100% pure domain!')
-    "
+            mod = getattr(node, "module", "") or [a.name for a in node.names][0]
+            assert mod not in {"httpx", "requests", "urllib", "aiohttp"}, f"Forbidden import {mod}"
+
+    print("Port is 100% pure domain!")
     ```
 
 ---
@@ -1418,10 +1410,10 @@ Key Invariants:
 - DTO Translation: Converts domain requests into HTTP JSON payloads and maps HTTP responses to domain results.
 
 #### 4.2 Concrete Universal Adapter Implementation
-Generate `${FEATURE_DIR}/infrastructure/adapters/http_${FEATURE_NAME}_adapter.py`:
 
-```bash
-cat << 'EOF' > "${FEATURE_DIR}/infrastructure/adapters/http_${FEATURE_NAME}_adapter.py"
+Target File: `${FEATURE_DIR}/infrastructure/adapters/http_${FEATURE_NAME}_adapter.py`
+
+```python
 from pathlib import Path
 from typing import Dict, Any, Optional
 from python_shared.http import ResilientHttpClient
@@ -1453,34 +1445,38 @@ class HttpFeatureOutboundAdapter:
         )
         response.raise_for_status()
         return response.json()
-EOF
 ```
 
 #### 4.3 Automated Verification Script
 Run this script to instantiate the adapter and assert that `ResilientHttpClient.from_config()` loaded the YAML configuration correctly:
 
-```bash
-python3 -c "
+```python
+# scripts/verify_adapter.py
 import os
 import sys
 from pathlib import Path
 
-monorepo_root = Path(os.environ['MONOREPO_ROOT'])
-sys.path.insert(0, str(monorepo_root / 'python-shared'))
+monorepo_root = Path(os.environ.get("MONOREPO_ROOT", "."))
+sys.path.insert(0, str(monorepo_root / "python-shared"))
 
 from python_shared.http import ResilientHttpClient
 
-feature_dir = Path(os.environ['FEATURE_DIR'])
-client = ResilientHttpClient.from_config(feature_dir, base_url='http://mock-service')
+feature_dir = Path(os.environ.get("FEATURE_DIR", "."))
+client = ResilientHttpClient.from_config(feature_dir, base_url="http://mock-service")
 
-assert client.profile == os.environ['FEATURE_PROFILE'], f'Profile mismatch: {client.profile}'
-assert client.timeout > 0.0, 'Client timeout must be configured'
+target_profile = os.environ.get("FEATURE_PROFILE", client.profile)
+assert client.profile == target_profile, f"Profile mismatch: {client.profile} vs {target_profile}"
+assert client.timeout > 0.0, "Client timeout must be configured"
 
-expected_step_count = 8 if client.profile == 'api_service' else (2 if client.profile == 'temporal_worker' else 1)
-assert len(client.runner.steps) == expected_step_count, f'Pipeline step count mismatch: {len(client.runner.steps)} vs {expected_step_count}'
+expected_step_count = 8 if client.profile == "api_service" else (2 if client.profile == "temporal_worker" else 1)
+assert len(client.runner.steps) == expected_step_count, f"Pipeline step count mismatch: {len(client.runner.steps)} vs {expected_step_count}"
 
-print(f'>>> Step 4 SUCCESS: Adapter successfully bound to {client.profile} with {len(client.runner.steps)} steps')
-"
+print(f">>> Step 4 SUCCESS: Adapter successfully bound to {client.profile} with {len(client.runner.steps)} steps")
+```
+
+Run via:
+```bash
+python scripts/verify_adapter.py
 ```
 
 #### 4.4 Input/Output, Interconnection & Standalone Usage Reference
@@ -1530,10 +1526,10 @@ The Domain Service encapsulates core business orchestration. Following Dependenc
 - Tests can mock the Port trivially without mocking HTTP sockets or patching libraries.
 
 #### 5.2 Concrete Universal Service Implementation
-Generate `${FEATURE_DIR}/service/${FEATURE_NAME}_service.py`:
 
-```bash
-cat << 'EOF' > "${FEATURE_DIR}/service/${FEATURE_NAME}_service.py"
+Target File: `${FEATURE_DIR}/service/${FEATURE_NAME}_service.py`
+
+```python
 from typing import Dict, Any, Optional
 
 class FeatureDomainService:
@@ -1560,37 +1556,42 @@ class FeatureDomainService:
             "feature": "verified",
             "result": raw_result
         }
-EOF
 ```
 
 #### 5.3 Automated Verification Script
 Run this script to verify that the domain service accepts the injected port and processes business actions:
 
-```bash
-python3 -c "
+```python
+# scripts/verify_domain_service.py
 import asyncio
-from unittest.mock import AsyncMock
+import os
+import sys
+import importlib.util
+from pathlib import Path
 
 class DummyPort:
     async def execute_remote_operation(self, payload, tenant_id, correlation_id=None):
-        return {'score': 0.99, 'tenant': tenant_id}
+        return {"score": 0.99, "tenant": tenant_id}
 
 async def run_test():
-    import os, sys, importlib.util
-    from pathlib import Path
-    service_file = Path(os.environ['FEATURE_DIR']) / 'service' / f\"{os.environ['FEATURE_NAME']}_service.py\"
-    spec = importlib.util.spec_from_file_location('service_mod', service_file)
+    service_file = Path(os.environ.get("FEATURE_DIR", ".")) / "service" / f"{os.environ.get('FEATURE_NAME', 'target')}_service.py"
+    spec = importlib.util.spec_from_file_location("service_mod", service_file)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     
     service = mod.FeatureDomainService(outbound_port=DummyPort())
-    output = await service.execute_business_action({'query': 'test'}, tenant_id='t-123')
-    assert output['status'] == 'COMPLETED'
-    assert output['result']['score'] == 0.99
+    output = await service.execute_business_action({"query": "test"}, tenant_id="t-123")
+    assert output["status"] == "COMPLETED"
+    assert output["result"]["score"] == 0.99
 
-asyncio.run(run_test())
-print('>>> Step 5 SUCCESS: Domain service dependency injection verified')
-"
+if __name__ == "__main__":
+    asyncio.run(run_test())
+    print(">>> Step 5 SUCCESS: Domain service dependency injection verified")
+```
+
+Run via:
+```bash
+python scripts/verify_domain_service.py
 ```
 
 #### 5.4 Input/Output, Interconnection & Standalone Usage Reference
@@ -1636,10 +1637,10 @@ Unit tests verify domain business logic in total isolation from the network:
 - `unittest.mock.AsyncMock` simulates downstream successes, network timeouts, and HTTP failures.
 
 #### 6.2 Concrete Universal Test Suite
-Generate `${FEATURE_DIR}/tests/${FEATURE_NAME}_service_test.py`:
 
-```bash
-cat << 'EOF' > "${FEATURE_DIR}/tests/${FEATURE_NAME}_service_test.py"
+Target File: `${FEATURE_DIR}/tests/${FEATURE_NAME}_service_test.py`
+
+```python
 import pytest
 from unittest.mock import AsyncMock
 
@@ -1685,7 +1686,6 @@ async def test_domain_service_empty_input_rejection(mock_port):
     service = mod.FeatureDomainService(outbound_port=mock_port)
     with pytest.raises(ValueError, match="Input data cannot be empty"):
         await service.execute_business_action(data={}, tenant_id="tenant-unit-test")
-EOF
 ```
 
 #### 6.3 Automated Test Execution
@@ -1724,10 +1724,10 @@ Verifies that the HTTP pipeline's defensive safeguards function as specified:
 - SSRF Validation rejects requests attempting to access RFC 1918 or AWS/GCP metadata (`169.254.169.254`).
 
 #### 7.2 Concrete Fault-Injection Test Suite
-Run this comprehensive integration test using `httpx.MockTransport`:
 
-```bash
-python3 -c "
+Target File: `${FEATURE_DIR}/tests/test_pipeline_resilience.py`
+
+```python
 import asyncio
 import httpx
 from python_shared.http import ResilientHttpClient
@@ -1738,52 +1738,57 @@ async def test_pipeline_resilience():
     def mock_handler(request: httpx.Request) -> httpx.Response:
         nonlocal captured_headers
         captured_headers = dict(request.headers)
-        return httpx.Response(200, json={'status': 'ok'})
+        return httpx.Response(200, json={"status": "ok"})
 
-    client = ResilientHttpClient(base_url='http://mock-service', profile='api_service')
+    client = ResilientHttpClient(base_url="http://mock-service", profile="api_service")
     client._async_client = httpx.AsyncClient(
         transport=httpx.MockTransport(mock_handler),
-        base_url='http://mock-service'
+        base_url="http://mock-service"
     )
 
-    resp = await client.execute_async('POST', '/test', json={'x': 1}, tenant_id='tenant-gold')
+    resp = await client.execute_async("POST", "/test", json={"x": 1}, tenant_id="tenant-gold")
     assert resp.status_code == 200
-    assert 'traceparent' in captured_headers, 'FAILED: traceparent missing from outbound request'
-    assert captured_headers.get('x-tenant-id') == 'tenant-gold', 'FAILED: x-tenant-id not propagated'
-    print('>>> Subtest A Passed: W3C Context & Tenant Headers Propagated')
+    assert "traceparent" in captured_headers, "FAILED: traceparent missing from outbound request"
+    assert captured_headers.get("x-tenant-id") == "tenant-gold", "FAILED: x-tenant-id not propagated"
+    print(">>> Subtest A Passed: W3C Context & Tenant Headers Propagated")
 
     # 2. Test Circuit Breaker Trip on Downstream Failures
     fail_count = 0
     def failing_handler(request: httpx.Request) -> httpx.Response:
         nonlocal fail_count
         fail_count += 1
-        return httpx.Response(503, json={'error': 'Service Unavailable'})
+        return httpx.Response(503, json={"error": "Service Unavailable"})
 
-    failing_client = ResilientHttpClient(base_url='http://mock-downstream', profile='api_service')
+    failing_client = ResilientHttpClient(base_url="http://mock-downstream", profile="api_service")
     failing_client._async_client = httpx.AsyncClient(
         transport=httpx.MockTransport(failing_handler),
-        base_url='http://mock-downstream'
+        base_url="http://mock-downstream"
     )
 
     for _ in range(5):
         try:
-            await failing_client.execute_async('GET', '/broken', tenant_id='t-1')
+            await failing_client.execute_async("GET", "/broken", tenant_id="t-1")
         except Exception:
             pass
 
     tripped = False
     try:
-        await failing_client.execute_async('GET', '/broken', tenant_id='t-1')
+        await failing_client.execute_async("GET", "/broken", tenant_id="t-1")
     except Exception as e:
-        if 'circuit' in str(e).lower() or 'open' in str(e).lower():
+        if "circuit" in str(e).lower() or "open" in str(e).lower():
             tripped = True
     
-    assert tripped, 'FAILED: Circuit breaker did not trip after 5 failures'
-    print('>>> Subtest B Passed: Circuit Breaker successfully tripped into OPEN state')
+    assert tripped, "FAILED: Circuit breaker did not trip after 5 failures"
+    print(">>> Subtest B Passed: Circuit Breaker successfully tripped into OPEN state")
 
-asyncio.run(test_pipeline_resilience())
-print('>>> Step 7 SUCCESS: Pipeline resilience and fault-injection verified!')
-"
+if __name__ == "__main__":
+    asyncio.run(test_pipeline_resilience())
+    print(">>> Step 7 SUCCESS: Pipeline resilience and fault-injection verified!")
+```
+
+Run via:
+```bash
+python "${FEATURE_DIR}/tests/test_pipeline_resilience.py"
 ```
 
 #### 7.3 Input/Output, Interconnection & Standalone Usage Reference
@@ -1801,24 +1806,25 @@ print('>>> Step 7 SUCCESS: Pipeline resilience and fault-injection verified!')
   - Downstream: Confirms that when Step 5's Domain Service invokes remote actions during an outage, connection pools and resources are protected from exhaustion.
 - **How to Use Individually (Standalone Mode)**:
   - Can be run as a standalone chaos engineering test or reliability harness on a developer workstation without live external dependencies:
-    ```bash
-    python3 -c "
-    import asyncio, httpx
+    ```python
+    import asyncio
+    import httpx
     from python_shared.http import ResilientHttpClient
 
     async def run_chaos():
-        client = ResilientHttpClient(base_url='http://mock-target', profile='api_service')
+        client = ResilientHttpClient(base_url="http://mock-target", profile="api_service")
         client._async_client = httpx.AsyncClient(
-            transport=httpx.MockTransport(lambda req: httpx.Response(503, json={'err': 'downstream_down'})),
-            base_url='http://mock-target'
+            transport=httpx.MockTransport(lambda req: httpx.Response(503, json={"err": "downstream_down"})),
+            base_url="http://mock-target"
         )
         for i in range(5):
-            try: await client.execute_async('GET', '/test', tenant_id='t-1')
-            except Exception: pass
-        print('Circuit breaker tripped successfully in standalone test!')
+            try:
+                await client.execute_async("GET", "/test", tenant_id="t-1")
+            except Exception:
+                pass
+        print("Circuit breaker tripped successfully in standalone test!")
 
     asyncio.run(run_chaos())
-    "
     ```
 
 ---
@@ -1830,31 +1836,46 @@ In production environments, microservices must allow updating configuration para
 - Atomic Swap: Updating the configuration swaps an immutable memory pointer.
 - Active sockets remain connected; new requests immediately execute with the updated snapshot.
 
-#### 8.2 Operational Verification Commands
-Execute this automated smoke test to verify live configuration updates:
+#### 8.2 Operational Verification Script
 
-```bash
-# 1. Read current timeout from http-config.yml
-CURRENT_TIMEOUT=$(grep "timeout_seconds:" "${FEATURE_DIR}/http-config.yml" | head -n 1 | awk '{print $2}')
-echo "Current timeout: ${CURRENT_TIMEOUT}s"
+Target File: `scripts/verify_hot_reload.py`
 
-# 2. Update timeout in-place using sed (e.g. adjust to 45.0s)
-sed -i 's/timeout_seconds: .*/timeout_seconds: 45.0/' "${FEATURE_DIR}/http-config.yml"
-
-# 3. Verify ResilientHttpClient reloads updated configuration
-python3 -c "
+```python
 import os
+import yaml
 from pathlib import Path
 from python_shared.http import ResilientHttpClient
 
-feature_dir = Path(os.environ['FEATURE_DIR'])
-client = ResilientHttpClient.from_config(feature_dir)
-assert client.timeout == 45.0, f'Hot reload failed: expected 45.0, got {client.timeout}'
-print('>>> Step 8 SUCCESS: Dynamic configuration reload verified without process restart!')
-"
+feature_dir = Path(os.environ.get("FEATURE_DIR", "."))
+config_file = feature_dir / "http-config.yml"
 
-# 4. Revert test modification
-sed -i "s/timeout_seconds: .*/timeout_seconds: ${CURRENT_TIMEOUT}/" "${FEATURE_DIR}/http-config.yml"
+# 1. Read initial timeout
+with open(config_file, "r") as f:
+    cfg = yaml.safe_load(f)
+original_timeout = cfg["client"]["timeout_seconds"]
+print(f"Original timeout: {original_timeout}s")
+
+try:
+    # 2. Update timeout in configuration file
+    cfg["client"]["timeout_seconds"] = 45.0
+    with open(config_file, "w") as f:
+        yaml.safe_dump(cfg, f)
+
+    # 3. Reload client configuration and verify update
+    client = ResilientHttpClient.from_config(feature_dir)
+    assert client.timeout == 45.0, f"Hot reload failed: expected 45.0, got {client.timeout}"
+    print(f">>> Step 8 SUCCESS: Dynamic configuration reload verified ({client.timeout}s) without process restart!")
+
+finally:
+    # 4. Revert to original configuration
+    cfg["client"]["timeout_seconds"] = original_timeout
+    with open(config_file, "w") as f:
+        yaml.safe_dump(cfg, f)
+```
+
+Run via:
+```bash
+python scripts/verify_hot_reload.py
 ```
 
 #### 8.3 Input/Output, Interconnection & Standalone Usage Reference
@@ -1872,12 +1893,11 @@ sed -i "s/timeout_seconds: .*/timeout_seconds: ${CURRENT_TIMEOUT}/" "${FEATURE_D
   - Downstream: Enables live operational tuning by SREs and production runbooks without triggering Kubernetes Pod restarts.
 - **How to Use Individually (Standalone Mode)**:
   - Can be tested standalone to verify dynamic configuration reloading mechanics without starting the web server:
-    ```bash
-    python3 -c "
+    ```python
     from python_shared.http import ResilientHttpClient
-    client = ResilientHttpClient.from_config('${FEATURE_DIR}')
-    print('Current timeout loaded dynamically:', client.timeout)
-    "
+
+    client = ResilientHttpClient.from_config(".")
+    print("Current timeout loaded dynamically:", client.timeout)
     ```
 
 ---
