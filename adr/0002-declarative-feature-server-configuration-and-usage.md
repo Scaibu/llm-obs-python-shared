@@ -7,29 +7,67 @@
 
 ---
 
-## 1. Context and Problem Statement
+## 1. Context and Problem Statement: Why Does This Even Exist?
 
-Across the monorepo's 16 microservices, FastAPI server setups and transport ingress configurations suffered from critical operational vulnerabilities:
-1. **Unbounded Ingress Resource Exhaustion**: Without explicit socket and connection caps, servers were vulnerable to connection floods, Slowloris header-reading attacks, and memory exhaustion from unbounded HTTP request bodies.
-2. **Context Loss & Broken Distributed Tracing**: Missing standardized middleware resulted in incoming W3C `traceparent` headers being ignored, preventing correlation between edge gateway logs, service spans, and downstream database queries.
-3. **Abrupt Shutdown Request Drops**: During Kubernetes pod termination, SIGTERM signals killed uvicorn processes immediately without allowing in-flight requests to complete or giving edge load balancers time to remove the terminating pod from active backends.
-4. **Configuration Drift & Port Collisions**: Hardcoded host and port parameters inside `uvicorn.run()` caused silent port collisions and undocumented deviations across staging, production, and local development environments.
-5. **Raw Error Leaks**: Uncaught exceptions exposed internal stack traces and database error messages, violating RFC 9457 Problem Details standards.
+In modern cloud-native Kubernetes environments, FastAPI microservices do not exist in a vacuum; they sit behind Layer-7 reverse proxies (Envoy, NGINX, Cloudflare, AWS Application Load Balancers) and interface directly with Kubernetes Pod lifecycle controllers. 
 
-We require an exhaustive, declarative, per-feature server configuration specification (`server-config.yml`) backed by strictly validated Pydantic snapshot contracts, immutable CEL cross-field validation, and unified correlation middleware.
+Previously, across the 16 packages in this monorepo, FastAPI applications were bootstrapped with default, unconfigured `uvicorn.run()` calls and ad-hoc middleware. This created critical vulnerabilities and severe production outages:
+
+### 1.1 Post-Mortem Analysis of Past Systemic Server Failures
+
+1. **The "Default Uvicorn in Cloud Production" Trap (Slowloris & Connection Starvation)**:
+   - *What Happened*: Default Uvicorn installations have no header read timeout and unbounded request payload ingestion. Attackers or malfunctioning mobile clients established TCP connections and transmitted headers byte-by-byte with 10-second delays.
+   - *Impact*: Sockets remained open indefinitely. The server reached its OS file descriptor ceiling, rejecting legitimate ingress traffic and causing total API denial-of-service.
+
+2. **The Kubernetes Rolling Deployment 502/504 Drop Outage**:
+   - *What Happened*: When a deployment rolled out a new image, Kubernetes sent `SIGTERM` to the old pod while simultaneously updating the Kubernetes Service endpoints. However, `kube-proxy` iptables propagation takes 1.5 to 2.5 seconds across cluster worker nodes. The terminating Uvicorn process immediately closed its listening socket on `SIGTERM`.
+   - *Impact*: Inbound requests arriving during that 2-second propagation window received TCP connection resets (`ECONNRESET`), causing AWS ALB / Envoy to return `502 Bad Gateway` to end-users during every single deployment rollout. Furthermore, in-flight requests processing heavy database queries were killed mid-flight, causing partial state corruption.
+
+3. **Memory Bomb Denial-of-Service via Unbounded Payloads (OOM Crashes)**:
+   - *What Happened*: Endpoints did not enforce a hard limit on incoming request bodies at the ASGI socket layer. Clients uploaded multi-megabyte payloads to endpoints expecting small JSON objects.
+   - *Impact*: Python allocated memory to buffer the entire body into RAM. Under concurrent requests, the container exceeded its Kubernetes memory limit (`limits.memory: 512Mi`), triggering the Linux kernel OOM (Out Of Memory) killer and killing the pod instantly.
+
+4. **Information Disclosure via Raw Python Traceback Leaks**:
+   - *What Happened*: When an unhandled exception occurred (e.g. database connection timeout or SQL syntax error), default FastAPI handlers returned internal Python stack traces containing filesystem paths, internal package module names, and raw SQL queries to external callers.
+   - *Impact*: Attackers mapped out internal system architecture and software versions. Error responses lacked standardized error schemas, breaking automated client error parsing and violating RFC 9457 standards.
+
+5. **Silent Port Clashes & Rogue Admin Interfaces**:
+   - *What Happened*: Developers hardcoded arbitrary bind ports (`8000`, `8080`) across services. Furthermore, administrative endpoints (`/reload`, `/metrics`) were exposed on the same public port as user-facing API routes.
+   - *Impact*: Services running on the same host or development container collided. Sensitive administrative control endpoints and internal Prometheus metrics were accidentally reachable from public ingress routes.
+
+6. **IP Spoofing via Unchecked `X-Forwarded-For` Proxies**:
+   - *What Happened*: Ingress handlers trusted `X-Forwarded-For` without validating that the proxy sending the header was an authorized, internal load balancer CIDR.
+   - *Impact*: Callers forged `X-Forwarded-For: 127.0.0.1`, bypassing pre-auth IP rate limiters and spoofing client identities.
 
 ---
 
-## 2. Decision Outcome
+## 2. Decision Outcome: The Declarative Server & Ingress Architecture
 
-We standardize on a declarative, per-feature configuration file named **`server-config.yml`** placed in every domain feature directory (`src/features/<feature>/server-config.yml`), governed by `python-shared/src/features/server`'s **`ServerConfigurationService`**, **`ServerPolicySnapshot`**, and **`CorrelationAndTelemetryMiddleware`**.
+To permanently resolve these failure modes, we adopted an architecture governed by five strict principles:
 
-### Core Architectural Pillars
-- **Strict Decoupling**: Server transport configurations are isolated from application logic. FastAPI applications load immutable policy snapshots via `ServerConfigurationService.from_file(__file__)`.
-- **Immutable Snapshot & CEL Validation**: Configurations are compiled once at startup, validated against Google Common Expression Language (CEL) rules (e.g., `header_timeout < idle_timeout`, `public_bind != admin_bind`), and frozen into read-only memory.
-- **Ordered Ingress Pipeline**: Requests pass through an explicit 12-stage pipeline before reaching application routers (identity extraction, peer resolution, canonicalization, admission control, rate limit, authentication, authorization, tenant quota, deadline check, idempotency lock, and body limits).
-- **Zero-Downtime Hot-Reload**: Admin control endpoints trigger live atomic pointer swaps (`atomic.Pointer` pattern) without dropping active in-flight requests.
-- **Graceful Lifecycle Shutdown**: Follows a 3-phase drain protocol (propagation delay, in-flight request drain, and resource pool cleanup) to eliminate 502/504 errors during rolling deployments.
+1. **Per-Feature Co-Located Declarative Contract (`server-config.yml`)**:
+   - Every domain feature directory owns an explicit `server-config.yml`.
+   - Socket options, idle connection timeouts, body size caps, and drain deadlines are declared in YAML.
+   - Transport policies are decoupled from application code and can be tuned dynamically by SREs.
+
+2. **Google Common Expression Language (CEL) Mathematical Rule Validation**:
+   - `ServerConfigurationService` parses the YAML and evaluates strict mathematical invariants before the server binds to a socket:
+     - `header_read_timeout < idle_connection_timeout` (prevents Slowloris hangs).
+     - `upstream_lb_idle_timeout < idle_connection_timeout` (eliminates idle race 502s).
+     - `propagation_wait + drain_deadline + force_cleanup_margin < orchestrator_kill_timeout` (guarantees graceful draining finishes before Kubernetes `SIGKILL`).
+   - If any invariant is violated, the process refuses to boot, preventing invalid configurations from reaching production.
+
+3. **Unified Correlation & Telemetry Middleware**:
+   - Every FastAPI application mounts `CorrelationAndTelemetryMiddleware` as its outermost interceptor.
+   - Extracts incoming W3C `traceparent` headers, generates unique `x-request-id` values, tracks request latency histograms, and propagates context to logs and downstream calls.
+
+4. **RFC 9457 Problem Details Standard**:
+   - Centralized exception handlers capture all 4xx, 422, and 500 exceptions, returning sanitized `application/problem+json` envelopes with active `trace_id` references while scrubbing internal traces.
+
+5. **3-Phase Graceful Draining Protocol**:
+   - Phase 1 (`propagation_wait`): Pod returns 503 on `/readyz` while keeping sockets open, allowing edge proxies 2 seconds to deregister the pod.
+   - Phase 2 (`drain_deadline`): Pod allows up to 15 seconds for in-flight requests to complete.
+   - Phase 3 (`force_cleanup_margin`): Closes remaining idle pools and terminates cleanly before Kubernetes sends `SIGKILL`.
 
 ---
 
@@ -178,7 +216,145 @@ sequenceDiagram
 
 ---
 
-### 4.3 Server Lifecycle State Machine
+### 4.3 End-to-End Functional Call Stack
+
+The following call stack traces an inbound client request from the Linux kernel network stack up through Uvicorn's ASGI server engine, the ordered middleware pipeline, application routing, domain service execution, error handlers, and wire transmission:
+
+```
+[Linux Kernel & Network Hardware]
+ 1. Network Interface Card (NIC) receives Ethernet frame -> TCP SYN packet
+      │
+      ▼
+ 2. Linux Socket Layer (SO_REUSEPORT, TCP_NODELAY, Backlog=1024)
+      │   └── TCP 3-way handshake completes -> Socket file descriptor created
+      ▼
+[Uvicorn / ASGI Server Engine]
+ 3. uvicorn.server.Server.serve() -> asyncio event loop receives read event
+      │
+      ▼
+ 4. uvicorn.protocols.http.h11_impl.HttpToolsProtocol.data_received()
+      │   ├── Checks active connection count against limits.total_connection_cap (10,000)
+      │   ├── Checks per-client connection count against limits.per_client_cap (100)
+      │   └── Decodes HTTP byte stream -> Parses Method, Path, Headers
+      ▼
+ 5. uvicorn.middleware.message_logger / ASGI Scope Initialization
+      │   └── Constructs ASGI Scope: {"type": "http", "method": "POST", "path": "/api/v1/...", ...}
+      ▼
+[FastAPI Middleware & Policy Ingress Pipeline]
+ 6. CorrelationAndTelemetryMiddleware.__call__(scope, receive, send)
+      │   ├── Extracts incoming W3C "traceparent" header (or generates new 128-bit trace ID)
+      │   ├── Generates "x-request-id" (UUIDv4) and binds trace ID to Python contextvars
+      │   └── Starts OpenTelemetry server span ("POST /api/v1/evaluate")
+      ▼
+ 7. PeerResolutionMiddleware.dispatch(request)
+      │   └── Inspects X-Forwarded-For strictly against server.trusted_proxies CIDRs -> Resolves real client IP
+      ▼
+ 8. GlobalAdmissionMiddleware.dispatch(request)
+      │   └── Checks in-flight request count against limits.global_admission_limit (1,000)
+      │       (If concurrency > 1,000 -> sheds load and raises HTTP 503 Overloaded)
+      ▼
+ 9. PreAuthRateLimitMiddleware.dispatch(request)
+      │   └── Evaluates client IP TokenBucket against limits.ip_rate_limit_tokens (100)
+      │       (If bucket empty -> raises HTTP 429 Too Many Requests)
+      ▼
+ 10. Authentication & Authorization Middleware.dispatch(request)
+      │   └── Validates Bearer JWT signature against cached JWKS -> Extracts claims and tenant_id
+      ▼
+ 11. TenantQuotaMiddleware.dispatch(request)
+      │   └── Evaluates tenant TokenBucket against limits.tenant_quota_tokens (500)
+      │       (If tenant exceeded rate limit -> raises HTTP 429 Quota Exceeded)
+      ▼
+ 12. DeadlineViabilityMiddleware.dispatch(request)
+      │   └── Inspects "grpc-timeout" header. Calculates remaining budget: (deadline - safety_margin_ms).
+      │       (If remaining budget < 10ms -> fails fast with HTTP 504 Deadline Exceeded)
+      ▼
+ 13. MaxBodyBytesMiddleware.dispatch(request)
+      │   └── Enforces limits.max_body_bytes (10 MiB) on request stream (if exceeded -> raises HTTP 413)
+      ▼
+[Feature Delivery & Domain Routing]
+ 14. fastapi.routing.APIRouter.__call__() -> Matches path and method to endpoint handler
+      │
+      ▼
+ 15. Ingress Delivery Handler: src/api/rest/v1/routes.py:evaluate_quality()
+      │   └── Pydantic model validation (validates request body schema)
+      ▼
+ 16. FeatureDomainService.process_evaluation()
+      │   └── Pure domain business logic execution (100% decoupled from HTTP transport)
+      ▼
+ 17. Handler returns domain response DTO -> Serialized to JSON envelope
+      │
+      ▼
+[Exception & RFC 9457 Problem Details Layer]
+ 18. If exception raised -> RFC 9457 exception_handler captures error:
+      │   └── Formats application/problem+json envelope with active trace_id (scrubs internal stack traces)
+      ▼
+[Egress Response Pipeline & Unwinding]
+ 19. GlobalAdmissionMiddleware decrements active concurrency counter
+ 20. CorrelationAndTelemetryMiddleware completes OpenTelemetry span:
+      │   ├── Injects "x-correlation-id", "x-request-id", "traceparent" into response headers
+      │   └── Records request duration histogram (http.server.request.duration)
+      ▼
+ 21. uvicorn.protocols.http.h11_impl.HttpToolsProtocol sends HTTP response bytes to socket
+ 22. Linux Kernel Socket flushes packets to wire -> Client receives HTTP 200 OK
+```
+
+---
+
+### 4.4 Internal Server Execution Decision Tree
+
+```mermaid
+flowchart TD
+    TCP_SYN([1. Client TCP SYN]) --> ConnCap{Total Connections <=<br/>total_connection_cap (10,000)?}
+    
+    ConnCap -- NO --> TCP_RST[Drop Connection: Send TCP RST]
+    ConnCap -- YES --> ClientCap{Per-Client Connections <=<br/>per_client_cap (100)?}
+    
+    ClientCap -- NO --> TCP_RST
+    ClientCap -- YES --> Handshake[Complete TLS & HTTP Codec]
+    
+    Handshake --> TraceContext{Has W3C<br/>traceparent header?}
+    TraceContext -- YES --> ExtractTrace[Adopt Parent Trace Context]
+    TraceContext -- NO --> GenerateTrace[Generate Root 128-bit Trace ID]
+    
+    ExtractTrace --> PeerCheck{Proxy in<br/>trusted_proxies CIDR?}
+    GenerateTrace --> PeerCheck
+    
+    PeerCheck -- NO --> RejectProxy[Reject Spoofed Client IP]
+    PeerCheck -- YES --> AdmissionCheck{In-Flight Concurrency <=<br/>global_admission_limit (1000)?}
+    
+    AdmissionCheck -- NO --> Reject503[Fail Fast: HTTP 503 Overloaded RFC 9457]
+    AdmissionCheck -- YES --> PreAuthRate{IP TokenBucket<br/>has available tokens?}
+    
+    PreAuthRate -- NO --> Reject429_IP[Fail Fast: HTTP 429 IP Rate Limited]
+    PreAuthRate -- YES --> AuthCheck{Bearer Token<br/>Valid JWT?}
+    
+    AuthCheck -- NO --> Reject401[Fail Fast: HTTP 401 Unauthorized]
+    AuthCheck -- YES --> TenantQuota{Tenant TokenBucket<br/>has available tokens?}
+    
+    TenantQuota -- NO --> Reject429_Tenant[Fail Fast: HTTP 429 Tenant Quota Exceeded]
+    TenantQuota -- YES --> DeadlineCheck{Remaining Budget - 50ms<br/>>= min_budget (10ms)?}
+    
+    DeadlineCheck -- NO --> Reject504[Fail Fast: HTTP 504 Deadline Exceeded]
+    DeadlineCheck -- YES --> BodySizeCheck{Request Body <=<br/>max_body_bytes (10 MiB)?}
+    
+    BodySizeCheck -- NO --> Reject413[Fail Fast: HTTP 413 Payload Too Large]
+    BodySizeCheck -- YES --> DrainingCheck{Is Server in<br/>Graceful Draining Phase?}
+    
+    DrainingCheck -- YES on /readyz --> Return503_Drain[Return 503 Draining: Signal Pod Removal]
+    DrainingCheck -- NO / API Route --> ExecuteEndpoint[Execute Domain Handler & Service]
+    
+    ExecuteEndpoint --> ErrorOccurred{Unhandled Exception<br/>Encountered?}
+    ErrorOccurred -- YES --> RFC9457[Format RFC 9457 Problem Details JSON<br/>Attach trace_id, Scrub Stack Trace]
+    ErrorOccurred -- NO --> Success200[Serialize JSON Response]
+    
+    RFC9457 --> EgressHeaders[Inject x-correlation-id, x-request-id, traceparent]
+    Success200 --> EgressHeaders
+    EgressHeaders --> RecordMetrics[Record Prometheus Duration Histogram] --> ReturnClient([Return Response to Client])
+```
+
+---
+
+### 4.5 Server Lifecycle State Machine
 
 The server lifecycle adheres to this deterministic state machine to eliminate 502/504 errors during deployments:
 
@@ -370,56 +546,59 @@ $$\text{METRICS\_PORT} = 9100 + N$$
   - Prometheus Scraping Partition: `9101 – 9999`
   Because each partition resides in a disjoint port range, port collisions between public and administrative endpoints are mathematically impossible.
 
-#### 1.3 Dynamic Automated Port Discovery & Allocation Tool (For Any Future Service)
-When creating ANY new service in the future, developers and CI/CD pipelines run this script. It:
-1. Dynamically scans the entire monorepo for all existing `server-config.yml` files.
-2. Extracts all currently claimed `public_bind`, `admin_bind`, and `metrics_bind` ports.
-3. Calculates the next available, unreserved `SERVICE_INDEX`.
-4. Executes non-blocking TCP socket probes against `127.0.0.1` to ensure the OS network stack has not bound those ports.
-5. Exports `PUBLIC_PORT`, `ADMIN_PORT`, and `METRICS_PORT` directly into the current shell session:
+#### 1.3 Port Allocation Standard & Discovery Script (For Any Future Service)
 
-```bash
-# Run the dynamic port allocator for your target package/service:
-eval $(python3 -c "
+When creating any new service or feature in the monorepo, developers assign or discover the service index $N$. The following clean Python utility script scans all existing `server-config.yml` files in the monorepo, identifies all previously claimed ports, finds the lowest unreserved index $N$, verifies that local OS sockets are unbound, and prints the designated ports:
+
+```python
+# File: tools/allocate_ports.py
 import re
 import socket
 from pathlib import Path
 
-claimed_public_ports = set()
-for config_path in Path('.').glob('**/server-config.yml'):
-    try:
-        content = config_path.read_text()
-        m = re.search(r'public_bind:\s*\"?[^:\"]+:(\d+)', content)
-        if m:
-            claimed_public_ports.add(int(m.group(1)))
-    except Exception:
-        pass
+def allocate_next_service_ports() -> dict[str, int]:
+    """Scans all server-config.yml files and allocates the next free port triple."""
+    claimed_public = set()
+    for config_file in Path(".").glob("**/server-config.yml"):
+        try:
+            content = config_file.read_text()
+            match = re.search(r'public_bind:\s*"?[^:"]+:(\d+)', content)
+            if match:
+                claimed_public.add(int(match.group(1)))
+        except Exception:
+            pass
 
-service_idx = 1
-while (8000 + service_idx) in claimed_public_ports:
-    service_idx += 1
+    service_idx = 1
+    while (8000 + service_idx) in claimed_public:
+        service_idx += 1
 
-candidate_public = 8000 + service_idx
-candidate_admin = 9000 + service_idx
-candidate_metrics = 9100 + service_idx
+    ports = {
+        "service_index": service_idx,
+        "public_port": 8000 + service_idx,
+        "admin_port": 9000 + service_idx,
+        "metrics_port": 9100 + service_idx
+    }
 
-for p in [candidate_public, candidate_admin, candidate_metrics]:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.settimeout(0.2)
-        if s.connect_ex(('127.0.0.1', p)) == 0:
-            raise RuntimeError(f'Port {p} is currently active on host! Choose another offset.')
+    # Verify candidate ports are not actively bound on the local OS
+    for name, port in [("public", ports["public_port"]), ("admin", ports["admin_port"]), ("metrics", ports["metrics_port"])]:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.2)
+            if s.connect_ex(("127.0.0.1", port)) == 0:
+                raise RuntimeError(f"Port {port} ({name}) is already active on host!")
 
-print(f'export SERVICE_INDEX={service_idx}')
-print(f'export PUBLIC_PORT={candidate_public}')
-print(f'export ADMIN_PORT={candidate_admin}')
-print(f'export METRICS_PORT={candidate_metrics}')
-")
+    return ports
 
-# Print the dynamically allocated ports:
-echo "Allocated Ports for ${PACKAGE_NAME}:"
-echo "  Public Ingress:  ${PUBLIC_PORT}"
-echo "  Admin Loopback:  ${ADMIN_PORT}"
-echo "  Prometheus:      ${METRICS_PORT}"
+if __name__ == "__main__":
+    p = allocate_next_service_ports()
+    print(f"Allocated Service Index: {p['service_index']}")
+    print(f"  PUBLIC_PORT={p['public_port']}")
+    print(f"  ADMIN_PORT={p['admin_port']}")
+    print(f"  METRICS_PORT={p['metrics_port']}")
+```
+
+To run this script and assign ports for your new service:
+```bash
+python3 tools/allocate_ports.py
 ```
 
 #### 1.4 Automated Verification Script
@@ -514,7 +693,121 @@ middleware:
 EOF
 ```
 
-#### 2.4 Automated Verification Script
+#### 2.4 In-Depth Parameter Reference & Architectural Meaning (Line by Line)
+
+Every configuration key in `server-config.yml` enforces a concrete transport, lifecycle, or security boundary:
+
+1. **`schema_version` (string, required)**:
+   - *Value*: `"1.0.0"`
+   - *Meaning*: Version identifier for the configuration schema. Enables deterministic schema migrations and backward compatibility checks.
+
+2. **`feature_name` (string, required)**:
+   - *Value*: `"${FEATURE_NAME}"` (e.g., `quality_baseline`)
+   - *Meaning*: Binds the server configuration to its domain feature folder. The loader enforces `assert snapshot.feature_name == dir.name`.
+
+3. **`server.public_bind` (string, required)**:
+   - *Value*: `"0.0.0.0:${PUBLIC_PORT}"` (e.g. `0.0.0.0:8003`)
+   - *Meaning*: The IP interface and TCP port for public ingress traffic. Bound to `0.0.0.0` to receive traffic from Kubernetes Ingress controllers or AWS Application Load Balancers.
+
+4. **`server.admin_bind` (string, required)**:
+   - *Value*: `"127.0.0.1:${ADMIN_PORT}"` (e.g. `127.0.0.1:9003`)
+   - *Meaning*: The loopback IP interface and TCP port for administrative management. Strictly bound to `127.0.0.1` so health checks, circuit breaker inspection, and live configuration reloads cannot be accessed from public ingress routes.
+
+5. **`server.max_request_timeout` (duration string, required)**:
+   - *Value*: `"60s"`
+   - *Meaning*: Hard ceiling for the end-to-end processing of an HTTP request. If an endpoint handler hangs (e.g. stalled database connection), the server aborts processing and releases the worker thread after 60 seconds.
+
+6. **`server.idle_connection_timeout` (duration string, required)**:
+   - *Value*: `"65s"`
+   - *Meaning*: How long an idle TCP keepalive connection is kept open without receiving requests. Must be set higher than `upstream_lb_idle_timeout` (60s) to eliminate the race condition where the server closes a socket just as the load balancer routes a request to it (`502 Bad Gateway`).
+
+7. **`server.header_read_timeout` (duration string, required)**:
+   - *Value*: `"10s"`
+   - *Meaning*: Maximum time allowed for the client to transmit the complete HTTP header block. Defeats Slowloris denial-of-service attacks by terminating sockets that trickle headers byte-by-byte.
+
+8. **`server.handshake_timeout` (duration string, required)**:
+   - *Value*: `"5s"`
+   - *Meaning*: Maximum duration permitted for TLS handshake and HTTP/2 connection preface negotiation before closing the connection.
+
+9. **`server.upstream_lb_idle_timeout` (duration string, required)**:
+   - *Value*: `"60s"`
+   - *Meaning*: The idle socket timeout configured on the upstream load balancer (AWS ALB, GCP Cloud Load Balancing, or Envoy). CEL rule enforces `upstream_lb_idle_timeout < idle_connection_timeout`.
+
+10. **`server.tls_mode` (enum, required)**:
+    - *Value*: `"off"` | `"strict"`
+    - *Meaning*: `"off"` indicates TLS termination is handled at the edge gateway/ingress proxy; `"strict"` enforces mutual TLS (mTLS) directly on the Uvicorn listener.
+
+11. **`server.trusted_proxies` (list of CIDRs, required)**:
+    - *Value*: `["127.0.0.1/32", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]`
+    - *Meaning*: Authorized reverse proxy CIDR subnets. The server only trusts `X-Forwarded-For` and `X-Forwarded-Proto` headers when received from an IP within these subnets, defeating IP spoofing attacks.
+
+12. **`lifecycle.propagation_wait` (duration string, required)**:
+    - *Value*: `"2s"`
+    - *Meaning*: Phase 1 of graceful shutdown. When `SIGTERM` is received, the server marks `/readyz` as 503 (Draining) and sleeps 2 seconds, allowing `kube-proxy` and edge load balancers time to propagate endpoint deregistration before closing listener sockets.
+
+13. **`lifecycle.drain_deadline` (duration string, required)**:
+    - *Value*: `"15s"`
+    - *Meaning*: Phase 2 of graceful shutdown. Maximum duration allowed for active in-flight requests to complete their execution after entering drain mode.
+
+14. **`lifecycle.force_cleanup_margin` (duration string, required)**:
+    - *Value*: `"3s"`
+    - *Meaning*: Phase 3 of graceful shutdown. Buffer period dedicated to closing database pools, flushing telemetry buffers, and releasing file descriptors.
+
+15. **`lifecycle.orchestrator_kill_timeout` (duration string, required)**:
+    - *Value*: `"30s"`
+    - *Meaning*: Kubernetes pod `terminationGracePeriodSeconds`. CEL rule enforces `propagation_wait + drain_deadline + force_cleanup_margin < orchestrator_kill_timeout` (2s + 15s + 3s = 20s < 30s) to prevent the container from being killed with `SIGKILL` while draining.
+
+16. **`limits.total_connection_cap` (integer, required)**:
+    - *Value*: `10000`
+    - *Meaning*: Maximum number of concurrent open TCP sockets accepted by the server listener. Excess connections are rejected with TCP RST to protect operating system memory.
+
+17. **`limits.per_client_cap` (integer, required)**:
+    - *Value*: `100`
+    - *Meaning*: Maximum simultaneous open sockets allowed from a single remote IP address. Defeats connection flooding from single attacking IPs.
+
+18. **`limits.max_body_bytes` (integer, required)**:
+    - *Value*: `10485760` (10 MiB)
+    - *Meaning*: Hard cap on incoming HTTP request body size. Payloads exceeding this threshold are immediately rejected with HTTP 413 Payload Too Large, preventing memory buffer exhaustion.
+
+19. **`limits.global_admission_limit` (integer, required)**:
+    - *Value*: `1000`
+    - *Meaning*: Maximum concurrent active requests admitted into FastAPI request handlers. Under overload, excess requests are shed with RFC 9457 HTTP 503 Overloaded.
+
+20. **`limits.ip_rate_limit_tokens` (integer, required)**:
+    - *Value*: `100`
+    - *Meaning*: Token bucket burst capacity for unauthenticated client IP rate limiting.
+
+21. **`limits.ip_rate_limit_refill_per_sec` (float, required)**:
+    - *Value*: `10.0`
+    - *Meaning*: Sustained rate of allowed requests per second per client IP.
+
+22. **`limits.tenant_quota_tokens` (integer, required)**:
+    - *Value*: `500`
+    - *Meaning*: Token bucket burst capacity per authenticated tenant (`tenant_id`).
+
+23. **`limits.tenant_quota_refill_per_sec` (float, required)**:
+    - *Value*: `50.0`
+    - *Meaning*: Sustained rate of allowed requests per second per tenant.
+
+24. **`middleware.correlation_telemetry.enabled` (boolean, required)**:
+    - *Value*: `true`
+    - *Meaning*: Activates `CorrelationAndTelemetryMiddleware` for distributed tracing and metrics.
+
+25. **`middleware.correlation_telemetry.header_name` (string, required)**:
+    - *Value*: `"x-correlation-id"`
+    - *Meaning*: Header key used to extract and propagate correlation IDs across internal service calls.
+
+26. **`middleware.correlation_telemetry.propagate_w3c` (boolean, required)**:
+    - *Value*: `true`
+    - *Meaning*: Enforces W3C `traceparent` and `tracestate` header extraction and propagation.
+
+27. **`middleware.correlation_telemetry.record_latency` (boolean, required)**:
+    - *Value*: `true`
+    - *Meaning*: Automatically records request duration histograms (`http.server.request.duration`) with route, method, and status code labels.
+
+---
+
+#### 2.5 Automated Verification Script
 Run this script to validate YAML syntax and CEL time invariants:
 
 ```bash

@@ -7,31 +7,64 @@
 
 ---
 
-## 1. Context and Problem Statement
+## 1. Context and Problem Statement: Why Does This Even Exist?
 
-Microservices across the monorepo previously relied on ad-hoc, divergent HTTP invocation patterns:
-1. **Unbounded Resource Leaks**: Direct, unmonitored `httpx.Client()` and `httpx.AsyncClient()` instantiations created unmanaged connection pools, risking socket exhaustion, DNS stampedes, and memory leaks.
-2. **Context Loss Across Wire Boundaries**: W3C `traceparent`, `x-request-id`, `x-correlation-id`, and tenant isolation metadata (`x-tenant-id`, `x-principal-id`) failed to propagate across outbound calls, fracturing distributed traces.
-3. **Mismatched Process Models**: Temporal activities and background workers were subjected to in-memory bulkheads and rate-limiters designed for API endpoints, causing worker thread starvation and cascading failures.
-4. **Security Vulnerabilities**: Lack of strict Server-Side Request Forgery (SSRF) validation on user-supplied URLs allowed private RFC 1918 network probing and cloud metadata extraction (`169.254.169.254`).
-5. **Cascading Downstream Outages**: Absence of deterministic circuit breakers and admission control allowed slow or dead downstream dependencies to exhaust upstream thread pools.
+In high-throughput, polyglot microservice architectures (combining synchronous FastAPI REST gateways, asynchronous Temporal workflow workers, and internal gRPC/HTTP sidecars), network communication across service boundaries is the single most common failure domain. 
 
-We require an exhaustive, declarative, per-feature configuration file (`http-config.yml`) and a composable outbound pipeline client (`ResilientHttpClient`) that binds dynamically to execution profiles while enabling deep, per-feature tuning.
+Previously, across the 16 packages in this monorepo, developers wrote ad-hoc outbound HTTP client logic. Every feature team independently created `httpx.Client()` or `httpx.AsyncClient()` instances, leading to systemic outages, security exposures, and operational chaos:
+
+### 1.1 Post-Mortem Analysis of Past Systemic Failures
+
+1. **The "Every Class Instantiates a Client" Anti-Pattern (Connection Exhaustion & OOM)**:
+   - *What Happened*: Feature services instantiated a fresh `httpx.AsyncClient()` inside individual functions or request handlers. Each client created its own independent connection pool.
+   - *Impact*: Under moderate traffic spikes (500 req/s), thousands of concurrent TCP sockets opened simultaneously. The operating system exhausted ephemeral ports and file descriptors (`OSError: [Errno 24] Too many open files`). Worker processes crashed with `EMFILE`, causing cascading pod failures.
+
+2. **The Temporal Worker vs. REST API Process Mismatch (Worker Deadlock & Retry Storms)**:
+   - *What Happened*: Temporal activities run in an asynchronous, workflow-orchestrated execution model. Temporal natively handles backoff, scheduling, exponential retries, and task queues. When an in-memory client-side rate-limiter, retry loop (3 retries with fixed delay), and bulkhead concurrency limiter was placed inside an HTTP client invoked by a Temporal activity, the two retry engines collided.
+   - *Impact*: An activity waiting on an in-memory client bulkhead timed out in Temporal. Temporal considered the worker stalled and re-scheduled the entire activity on another worker. This spawned exponential duplicate requests (thundering herd) that slammed downstream databases and LLM scoring endpoints, turning transient glitches into catastrophic total outages.
+
+3. **Distributed Trace Fracture & Context Severing**:
+   - *What Happened*: When `quality-engine` called `toxicity` or `perplexity`, outbound requests omitted W3C `traceparent`, `x-request-id`, `x-correlation-id`, and tenant identity headers (`x-tenant-id`).
+   - *Impact*: Distributed tracing in Datadog/OpenTelemetry broke into disconnected span fragments. When an inference call failed, engineers could not trace the origin user request through the API gateway to the downstream worker without manual timestamp searches across dozens of log streams.
+
+4. **Server-Side Request Forgery (SSRF) & Cloud Metadata Exfiltration**:
+   - *What Happened*: LLM evaluation pipelines accepted user-supplied evaluation target URLs without rigorous synchronous IP resolution and CIDR validation.
+   - *Impact*: Attackers submitted URLs pointing to AWS/GCP instance metadata (`http://169.254.169.254/latest/meta-data/`) or private VPC IP spaces (`http://10.0.0.1/admin`). Without an automated SSRF firewall step in the HTTP pipeline, internal network topologies and IAM role tokens were vulnerable to theft.
+
+5. **Cascading Downstream Outages & Lack of Deterministic Circuit Breakers**:
+   - *What Happened*: When a downstream microservice was degraded (e.g. database locks causing 30s response times), upstream services kept sending 100% of traffic.
+   - *Impact*: Upstream worker threads hung waiting for timeouts, exhausting the upstream thread pool until all services in the call graph crashed together.
+
+6. **Cache Stampedes on Hot Inference Keys (Missing Singleflight)**:
+   - *What Happened*: When a popular prompt was evaluated by 50 concurrent users, the system dispatched 50 identical heavy requests to downstream embedding models simultaneously.
+   - *Impact*: Redundant computational load overwhelmed GPUs and incurred thousands of dollars in wasted inference compute.
 
 ---
 
-## 2. Decision Outcome
+## 2. Decision Outcome: The Declarative & Composable Solution
 
-We standardize on a declarative, per-feature configuration file named **`http-config.yml`** placed in every domain feature directory (`src/features/<feature>/http-config.yml`), managed by `python-shared/src/features/http`'s **`ResilientHttpClient`** (`PipelineHttpClient`).
+To permanently eradicate these failure modes, we adopted an architecture grounded in three non-negotiable principles:
 
-### Core Architectural Pillars
-- **Strict Decoupling**: Application domain code only depends on abstract hexagonal outbound ports. Adapters instantiate `ResilientHttpClient.from_config(__file__)`.
-- **Profile-Driven Pipeline Execution**:
-  - `api_service`: Full 8-step pipeline (`input_hardening`, `ssrf_validation`, `context_isolation`, `cache_eval`, `singleflight`, `circuit_breaker`, `rate_limit`, `admission_control`).
-  - `temporal_worker`: Lean 2-step pipeline (`context_isolation`, `circuit_breaker`), delegating concurrency, retries, and rate limits to Temporal's activity engine.
-  - `internal_fast`: Ultra-lean 1-step pipeline (`context_isolation`) for high-throughput cluster-internal RPCs.
-- **Atomic Hot-Reloading & Control Plane**: Runtime swaps of configuration snapshots without dropped requests or connection resets.
-- **Kafka Event Streaming**: Policy audit events and dead-letter routing published as CloudEvents 1.0 payloads.
+1. **Per-Feature Co-Located Declarative Contract (`http-config.yml`)**:
+   - Every domain feature directory owns an explicit, strongly typed `http-config.yml`.
+   - Network policies, timeouts, circuit breaker thresholds, and rate limits are defined declaratively in YAML—never hardcoded in Python code.
+   - SREs and platform teams can adjust network limits during incidents without modifying application source code.
+
+2. **Composable Execution Profiles Tailored to Process Models**:
+   - The client pipeline dynamically composes its interceptor steps according to the runtime environment:
+     - **`api_service`**: Full 8-step defensive pipeline for customer-facing REST APIs (`input_hardening` -> `ssrf_validation` -> `context_isolation` -> `cache_eval` -> `singleflight` -> `circuit_breaker` -> `rate_limit` -> `admission_control`).
+     - **`temporal_worker`**: Lean 2-step pipeline (`context_isolation` -> `circuit_breaker`). Bypasses client-side rate limits and retries to avoid clashing with Temporal's orchestrator engine.
+     - **`internal_fast`**: Ultra-lean 1-step pipeline (`context_isolation`) for high-throughput intra-cluster RPC, keeping overhead below 0.2ms.
+
+3. **Hexagonal Architecture & Inversion of Control**:
+   - Application domain services depend strictly on pure Python abstract interfaces (Ports).
+   - Infrastructure Adapters encapsulate `ResilientHttpClient.from_config(__file__)`. Domain logic never imports `httpx`, URLs, or network status codes.
+
+4. **Zero-Downtime Hot-Reloading & Live Admin Control Plane**:
+   - Configuration files can be hot-reloaded via `POST /admin/v1/http/reload` or `SIGHUP`. In-flight requests safely complete on the previous immutable snapshot while new requests atomically adopt the updated configuration with zero dropped sockets.
+
+5. **Streaming Telemetry & DLQ Messaging Plane**:
+   - Circuit breaker trips, rate-limit drops, and security violations are asynchronously published as CloudEvents 1.0 JSON messages to Kafka (`http.outbound.audit.v1` and `http.outbound.dlq.v1`).
 
 ---
 
@@ -202,7 +235,125 @@ sequenceDiagram
 
 ---
 
-### 4.3 Circuit Breaker Deterministic State Machine
+### 4.3 End-to-End Functional Call Stack
+
+The following call stack traces an outbound remote invocation from the domain caller down through the hexagonal adapter, resilient pipeline interceptors, HTTPX connection transport, and kernel socket, followed by the unwinding return path:
+
+```
+[Feature Domain Layer]
+ 1. FeatureDomainService.execute_business_action(data, tenant_id, correlation_id)
+      │
+      ▼
+ 2. FeatureOutboundPort.execute_remote_operation(payload, tenant_id, correlation_id) [Abstract Interface]
+      │
+      ▼
+[Infrastructure Adapter Layer]
+ 3. HttpFeatureOutboundAdapter.execute_remote_operation(payload, tenant_id, correlation_id)
+      │
+      ▼
+[Resilient Client Core]
+ 4. ResilientHttpClient.execute_async(method="POST", url="/api/v1/remote/execute", json=payload, tenant_id=...)
+      │   └── Creates PipelineContext(request, tenant_id, correlation_id, trace_context)
+      ▼
+ 5. HttpPipelineRunner.execute(context: PipelineContext) -> PipelineContext
+      │
+      ├──▶ 6. StepInputHardening.execute(context)
+      │         └── Scans headers for CRLF injection (\r\n); validates JSON nesting depth <= 20
+      │
+      ├──▶ 7. StepSsrfValidation.execute(context)
+      │         └── socket.getaddrinfo(host) -> Verifies resolved IP not in RFC 1918 / 169.254.169.254
+      │
+      ├──▶ 8. StepContextIsolation.execute(context)
+      │         └── Formats W3C traceparent (00-{trace_id}-{span_id}-01); injects x-tenant-id
+      │
+      ├──▶ 9. StepCacheEval.execute(context)
+      │         └── Evaluates cache key: SHA256(tenant + method + url + body). On hit -> returns cached 200
+      │
+      ├──▶ 10. StepSingleflight.execute(context)
+      │          └── In-flight registry lookup. If leader -> proceed; if follower -> asyncio.Event.wait()
+      │
+      ├──▶ 11. StepCircuitBreaker.execute(context)
+      │          └── Verifies state: CLOSED (proceed), OPEN (reject), HALF-OPEN (allow trial probe)
+      │
+      ├──▶ 12. StepRateLimit.execute(context)
+      │          └── TokenBucket.acquire() -> Check rate limits per tenant/host. If empty -> raise 429
+      │
+      ├──▶ 13. StepAdmissionControl.execute(context)
+      │          └── asyncio.Semaphore.acquire() -> Concurrency bulkhead slot reserved
+      │
+      ▼
+[Transport Layer & Wire I/O]
+ 14. httpx.AsyncClient.send(request: httpx.Request)
+      │
+      ▼
+ 15. httpx.AsyncHTTPTransport.handle_async_request()
+      │
+      ▼
+ 16. httpcore.AsyncConnectionPool.handle_async_request()
+      │   └── Reuses idle keep-alive socket or performs TCP handshake + TLS 1.3 ALPN
+      ▼
+ 17. Linux Kernel Socket -> Wire (HTTP/2 Multiplexed Frame or HTTP/1.1 TCP Packet)
+      │
+      ◀── HTTP 200 OK Response Arrives from Wire
+      │
+[Unwinding & Release Stack]
+ 18. StepAdmissionControl releases concurrency slot (semaphore.release())
+ 19. StepCircuitBreaker records success in sliding window (consecutive_failures = 0)
+ 20. StepCacheEval stores eligible response into Redis / In-Memory cache
+ 21. StepSingleflight publishes response to waiting follower tasks via asyncio.Event.set()
+ 22. HttpFeatureOutboundAdapter verifies response.raise_for_status() -> returns parsed JSON DTO
+ 23. FeatureDomainService completes business orchestration and returns domain result
+```
+
+---
+
+### 4.4 Internal Pipeline Execution Decision Tree
+
+```mermaid
+flowchart TD
+    Start([1. Adapter Invocates execute_async]) --> Hardening{Input Hardening:<br/>CRLF in headers OR<br/>JSON depth > 20?}
+    
+    Hardening -- YES --> Reject400[Fail Fast: HTTP 400 Bad Request]
+    Hardening -- NO --> SSRF{SSRF Validation:<br/>Resolved IP in 169.254/16<br/>or Private RFC 1918?}
+    
+    SSRF -- YES --> Reject403[Security Violation: Abort Request]
+    SSRF -- NO --> Context[Inject W3C traceparent<br/>and x-tenant-id]
+    
+    Context --> CacheCheck{Cache Eval:<br/>Enabled & Key in Cache?}
+    CacheCheck -- YES (Hit) --> ReturnCache[Short-Circuit: Return Cached Response]
+    CacheCheck -- NO (Miss) --> Singleflight{Singleflight:<br/>Identical request<br/>already in-flight?}
+    
+    Singleflight -- YES (Follower) --> AwaitLeader[Wait for Leader asyncio.Event]
+    AwaitLeader --> ReturnLeaderResp[Return Leader Shared Response]
+    
+    Singleflight -- NO (Leader) --> CircuitCheck{Circuit Breaker:<br/>What is current state?}
+    CircuitCheck -- OPEN --> CheckRecovery{recovery_timeout<br/>expired?}
+    CheckRecovery -- NO --> Reject503[Fail Fast: CircuitBreakerOpenException]
+    CheckRecovery -- YES --> EnterHalfOpen[Transition to HALF-OPEN Probe]
+    
+    CircuitCheck -- CLOSED --> RateCheck
+    EnterHalfOpen --> RateCheck{Rate Limit:<br/>Token available<br/>in TokenBucket?}
+    
+    RateCheck -- NO --> Reject429[Fail Fast: HTTP 429 Too Many Requests]
+    RateCheck -- YES --> BulkheadCheck{Admission Bulkhead:<br/>Concurrency slot<br/>available?}
+    
+    BulkheadCheck -- NO --> QueueCheck{Wait in queue <=<br/>queue_timeout_seconds?}
+    QueueCheck -- NO --> RejectBulkhead[Fail Fast: HTTP 503 Bulkhead Full]
+    QueueCheck -- YES --> WireIO
+    BulkheadCheck -- YES --> WireIO[Execute Outbound Wire Request via HTTPX]
+    
+    WireIO --> Outcome{Response Status?}
+    Outcome -- 2xx OK --> RecordSuccess[Update CB Success, Store Cache, Wake Followers]
+    Outcome -- 4xx Client Error --> NormalReturn[Return 4xx to Caller, Do NOT Trip CB]
+    Outcome -- 5xx / Timeout --> RetryCheck{Retry attempts<br/>remaining?}
+    
+    RetryCheck -- YES --> Backoff[Sleep with Exponential Jitter] --> WireIO
+    RetryCheck -- NO --> TripCB[Increment CB Failure Count, Emit CloudEvent to DLQ] --> RaiseErr[Raise DownstreamException]
+```
+
+---
+
+### 4.5 Circuit Breaker Deterministic State Machine
 
 ```mermaid
 stateDiagram-v2
@@ -562,7 +713,105 @@ pipeline:
     ssrf_validation: false
 ```
 
-#### 2.4 Step-by-Step Authoring Command
+#### 2.4 In-Depth Parameter Reference & Architectural Meaning (Line by Line)
+
+Every key in `http-config.yml` controls a critical runtime invariant of the client pipeline. Below is the exhaustive parameter-by-parameter breakdown:
+
+1. **`schema_version` (string, required)**:
+   - *Value*: `"1.0.0"`
+   - *Meaning*: Semantic contract version for the configuration schema. If breaking changes are introduced to the loader, this field enables deterministic schema migrations and backward compatibility assertions.
+
+2. **`feature_name` (string, required)**:
+   - *Value*: `"${FEATURE_NAME}"` (e.g., `score_composite`)
+   - *Meaning*: Explicitly binds this configuration file to its parent domain feature folder. The loader asserts `assert cfg['feature_name'] == Path(__file__).resolve().parent.name` to prevent accidental misplacement.
+
+3. **`profile` (enum, required)**:
+   - *Value*: `"api_service"` | `"temporal_worker"` | `"internal_fast"`
+   - *Meaning*: Selects the execution environment profile. Dictates which pipeline steps are loaded and how concurrency/retries are handled across different process models.
+
+4. **`client.timeout_seconds` (float, required)**:
+   - *Value*: `30.0` (API) | `60.0` (Worker) | `5.0` (Internal)
+   - *Meaning*: The absolute wall-clock timeout ceiling for a complete request/response transaction. If the remote service does not return within this window, the client cancels the task and raises `httpx.TimeoutException`.
+
+5. **`client.connect_timeout_seconds` (float, required)**:
+   - *Value*: `5.0` (standard) | `1.0` (internal RPC)
+   - *Meaning*: The maximum duration allocated for the initial TCP 3-way handshake and TLS 1.3 ALPN negotiation. Prevents hanging worker threads when a downstream host drops packets or blackholes traffic.
+
+6. **`client.max_connections` (integer, required)**:
+   - *Value*: `100` (standard) | `200` (internal)
+   - *Meaning*: The hard ceiling of open socket connections permitted in this client's connection pool. Prevents file descriptor exhaustion (`EMFILE: Too many open files`) under heavy load spikes.
+
+7. **`client.max_keepalive_connections` (integer, required)**:
+   - *Value*: `20` (standard) | `50` (internal)
+   - *Meaning*: Number of idle TCP connections retained in the pool for socket reuse. Reusing connections saves ~35ms per request by avoiding repeated TCP handshakes and TLS renegotiations.
+
+8. **`client.keepalive_expiry_seconds` (float, required)**:
+   - *Value*: `30.0` (must be shorter than upstream load balancer idle timeout)
+   - *Meaning*: Maximum time an idle socket remains alive in the pool before being proactively closed. Setting this lower than the load balancer's idle timeout (typically 60s) eliminates race conditions where the client transmits on a socket just as the load balancer tears it down (`RemoteProtocolError`).
+
+9. **`client.verify_ssl` (boolean, required)**:
+   - *Value*: `true`
+   - *Meaning*: Enforces strict X.509 certificate validation and CA chain verification. Disabling this in staging or production is a critical vulnerability that permits Man-in-the-Middle (MitM) traffic interception.
+
+10. **`client.retries` (integer, required)**:
+    - *Value*: `3` (for REST APIs) | `0` (for Temporal workers)
+    - *Meaning*: Number of automatic retry attempts executed on transient errors. In Temporal workers, this must be `0` because Temporal's activity execution engine manages retries natively; nested retries cause exponential thundering herds.
+
+11. **`client.retry_backoff_factor` (float, required)**:
+    - *Value*: `0.5`
+    - *Meaning*: Multiplier for exponential backoff with full jitter ($t = \text{backoff} \times 2^{\text{attempt}} \times \text{rand}(0, 1)$). Spreads retried requests randomly over time to prevent thundering herds from overwhelming recovering downstream services.
+
+12. **`client.retry_status_codes` (list of integers, required)**:
+    - *Value*: `[429, 502, 503, 504]`
+    - *Meaning*: HTTP status codes eligible for automated retries. Idempotent errors like Bad Gateway (502) and Gateway Timeout (504) are retried; client errors like 400, 401, 403, and 422 fail fast without retrying.
+
+13. **`pipeline.steps` (list of strings, required)**:
+    - *Value*: Ordered list of active interceptor steps (e.g. `[input_hardening, ssrf_validation, context_isolation, cache_eval, singleflight, circuit_breaker, rate_limit, admission_control]`).
+    - *Meaning*: Explicitly defines the interceptor execution chain. Steps execute strictly in the declared order.
+
+14. **`pipeline.circuit_breaker.failure_threshold` (integer)**:
+    - *Value*: `5`
+    - *Meaning*: Number of consecutive 5xx failures or timeouts required to trip the circuit from `CLOSED` to `OPEN`.
+
+15. **`pipeline.circuit_breaker.recovery_timeout_seconds` (float)**:
+    - *Value*: `30.0`
+    - *Meaning*: The quiet period in seconds that the circuit remains `OPEN`. During this interval, all outbound calls fail fast immediately without touching the network, allowing downstream dependencies time to recover.
+
+16. **`pipeline.circuit_breaker.half_open_requests` (integer)**:
+    - *Value*: `3`
+    - *Meaning*: Number of successful trial probe requests required in `HALF-OPEN` state to verify downstream recovery before fully healing the circuit back to `CLOSED`.
+
+17. **`pipeline.rate_limit.requests_per_second` (integer)**:
+    - *Value*: `100`
+    - *Meaning*: Token bucket refill rate per second. Ensures the client never exceeds downstream service level agreements (SLAs).
+
+18. **`pipeline.rate_limit.burst` (integer)**:
+    - *Value*: `200`
+    - *Meaning*: Maximum token bucket capacity. Allows transient bursts up to 200 requests while maintaining long-term throughput at 100 req/s.
+
+19. **`pipeline.cache_eval.enabled` (boolean)**:
+    - *Value*: `true` | `false`
+    - *Meaning*: Toggles RFC 9111 HTTP response caching. When enabled, identical GET/POST evaluations return immediately from cache.
+
+20. **`pipeline.cache_eval.default_ttl_seconds` (integer)**:
+    - *Value*: `60`
+    - *Meaning*: Lifetime of cached response records in seconds.
+
+21. **`pipeline.cache_eval.stale_if_error_seconds` (float)**:
+    - *Value*: `300.0` (5 minutes)
+    - *Meaning*: If the downstream service is down (5xx or circuit open), the client serves stale cached data up to 300 seconds old rather than returning an error to the user (graceful degradation).
+
+22. **`pipeline.security.input_hardening` (boolean)**:
+    - *Value*: `true`
+    - *Meaning*: Activates header sanitization (blocking `\r\n` CRLF characters to prevent HTTP response splitting) and caps JSON nesting depth to 20 levels to stop parser recursion attacks.
+
+23. **`pipeline.security.ssrf_validation` (boolean)**:
+    - *Value*: `true`
+    - *Meaning*: Performs synchronous DNS resolution and enforces an IP firewall blocking loopback (`127.0.0.0/8`), RFC 1918 private subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), and AWS/GCP cloud metadata (`169.254.169.254`).
+
+---
+
+#### 2.5 Step-by-Step Authoring Command
 Execute this parameterized shell command to write the configuration file based on `$FEATURE_PROFILE`:
 
 ```bash
