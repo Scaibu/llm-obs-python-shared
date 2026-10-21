@@ -698,6 +698,19 @@ export MONOREPO_ROOT="$(pwd)"
 export FEATURE_DIR="${MONOREPO_ROOT}/${PACKAGE_NAME}/src/features/${FEATURE_NAME}"
 ```
 
+#### 8.0.2 Step Input/Output & Interconnection Master Matrix
+
+| Step | Component Name | Exact Inputs Given | Exact Outputs Produced | Direct Upstream Source | Direct Downstream Consumer | How to Use Individually (Standalone Mode) |
+|---|---|---|---|---|---|---|
+| **Step 1** | **Port Allocation** | `SERVICE_INDEX` $N$, partition rules | Allocated port triple (`PUBLIC_PORT`, `ADMIN_PORT`, `METRICS_PORT`) | Monorepo service inventory | Step 2 (`server-config.yml`) | Verify candidate ports via `VerifyPortTriple` algorithm |
+| **Step 2** | **Declarative Config** | Allocated ports, connection caps, CEL limits | Validated `${FEATURE_DIR}/server-config.yml` | Step 1 (ports) | Step 3 (`ServerSnapshot`) | Check syntax and CEL time rules via `VerifyServerConfig` algorithm |
+| **Step 3** | **Snapshot Loader** | Feature directory, `server-config.yml` | Immutable `ServerSnapshot` object | Step 2 (`server-config.yml`) | Step 4 (`create_app()`), Step 7 (`main.py`) | Build snapshot offline via `VerifyServerSnapshot` |
+| **Step 4** | **FastAPI Factory** | `ServerSnapshot`, package name | Instantiated `FastAPI` app with telemetry middleware | Step 3 (`ServerSnapshot`) | Step 5 (handlers), Step 6 (probes) | Instantiate app and inspect attached middleware in isolation |
+| **Step 5** | **Problem Details** | `FastAPI` instance | RFC 9457 compliant error handling routes | Step 4 (`FastAPI` instance) | Step 7 (`main.py`), live clients | Test error sanitization and trace ID injection via `VerifyProblemDetailsFormatting` |
+| **Step 6** | **K8s Probes** | `FastAPI` instance, draining state flag | `/healthz`, `/livez`, `/readyz` probe endpoints | Step 4 (`FastAPI` instance) | Kubernetes kubelet, load balancer | Verify 200/503 probe responses via `VerifyKubernetesProbes` |
+| **Step 7** | **Uvicorn Runner** | `create_app()`, `ServerSnapshot` socket binds | Running ASGI server process with signal traps | Steps 3, 4, 5, 6 | Container runtime, edge proxy | Inspect runner parameters via `VerifyRunnerConfiguration` |
+| **Step 8** | **Live Ingress** | Running HTTP server, test HTTP requests | Verified 200 responses, echoed trace IDs, 413 rejections | Step 7 (running server) | QA and CI/CD pipelines | Run live ingress tests via `VerifyLiveIngress` algorithm |
+
 ---
 
 ### Step 1: Universal Port Planning & Dynamic Allocation Algorithm (Any Future Service)
@@ -779,36 +792,59 @@ To run this script and assign ports for your new service:
 python3 tools/allocate_ports.py
 ```
 
-#### 1.4 Automated Verification Script
-Run this script to assert that the designated ports are distinct, conform to partition ranges, and are locally available:
+#### 1.4 Automated Verification Logic (Pseudocode)
+Validation of the assigned port triple partitioning and host socket availability is performed as follows:
 
-```python
-# scripts/verify_ports.py
-import socket
-import os
+```text
+algorithm VerifyPortTriple:
+    input: service_index, public_port, admin_port, metrics_port
+    
+    # 1. Assert mathematical partition ranges
+    assert 8000 < public_port < 9000, "Public port outside ingress partition (8001-8899)"
+    assert 9000 < admin_port < 9100, "Admin port outside admin partition (9001-9099)"
+    assert 9100 < metrics_port < 10000, "Metrics port outside scraping partition (9101-9999)"
+    assert are_distinct(public_port, admin_port, metrics_port)
+    
+    # 2. Assert local socket availability
+    for port in [public_port, admin_port, metrics_port]:
+        assert not is_port_bound(port), "Port already in use on host: " + str(port)
+        
+    return STATUS_VERIFIED
+```
 
-ports = {
-    "PUBLIC_PORT": int(os.environ.get("PUBLIC_PORT", 8003)),
-    "ADMIN_PORT": int(os.environ.get("ADMIN_PORT", 9003)),
-    "METRICS_PORT": int(os.environ.get("METRICS_PORT", 9103))
+#### 1.5 Input/Output, Interconnection & Standalone Usage Reference
+
+- **Inputs Given**:
+```json
+{
+  "service_index": 3,
+  "partition_formulas": {
+    "public_port": "8000 + N",
+    "admin_port": "9000 + N",
+    "metrics_port": "9100 + N"
+  }
 }
-
-assert 8000 < ports["PUBLIC_PORT"] < 9000, f"Public port {ports['PUBLIC_PORT']} out of range (8001-8899)"
-assert len(set(ports.values())) == 3, "VIOLATION: Public, Admin, and Metrics ports must all be distinct!"
-
-for name, port in ports.items():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.settimeout(0.5)
-        result = s.connect_ex(("127.0.0.1", port))
-        assert result != 0, f"PORT CONFLICT: Port {port} ({name}) is already in use by another process!"
-
-print(f">>> Step 1 SUCCESS: All ports ({ports}) are dynamically allocated and distinct")
 ```
 
-Run via:
-```bash
-python scripts/verify_ports.py
+- **Outputs Produced**:
+```json
+{
+  "service_index": 3,
+  "public_port": 8003,
+  "admin_port": 9003,
+  "metrics_port": 9103,
+  "partition_status": "DISJOINT_AND_AVAILABLE"
+}
 ```
+
+- **How It Connects to Other Steps**:
+  - Upstream: Depends on monorepo service registry and directory scan.
+  - Downstream: Passed into Step 2 to configure `server.public_bind` and `server.admin_bind` in `server-config.yml`.
+- **How to Use Individually (Standalone Mode)**:
+  - Can be run as a standalone CLI tool during service onboarding:
+    ```bash
+    python3 tools/allocate_ports.py
+    ```
 
 ---
 
@@ -1030,50 +1066,82 @@ middleware:
     record_latency: true
 ```
 
-#### 2.4 Automated Verification Script
-Run this script to validate YAML syntax and CEL time invariants:
+#### 2.4 Automated Verification Logic (Pseudocode)
+Validation of the declarative server configuration and Google CEL cross-field time invariants is executed as follows:
 
-```python
-# scripts/verify_server_config.py
-import os
-import yaml
-from pathlib import Path
+```text
+algorithm VerifyServerConfig:
+    input: config_file = "${FEATURE_DIR}/server-config.yml"
+    
+    cfg = parse_yaml(config_file)
+    assert cfg.schema_version == "1.0.0"
+    assert cfg.feature_name == get_env("FEATURE_NAME")
+    
+    # 1. Enforce Slowloris & Keepalive CEL cross-field invariants
+    assert cfg.server.header_read_timeout < cfg.server.idle_connection_timeout, "CEL VIOLATION: header_read_timeout must be < idle_connection_timeout"
+    assert cfg.server.upstream_lb_idle_timeout < cfg.server.idle_connection_timeout, "CEL VIOLATION: upstream_lb_idle_timeout must be < idle_connection_timeout"
 
-config_path = Path(os.environ.get("FEATURE_DIR", ".")) / "server-config.yml"
-assert config_path.is_file(), f"FAILED: {config_path} not found"
-
-with open(config_path) as f:
-    cfg = yaml.safe_load(f)
-
-def parse_seconds(v: str) -> float:
-    return float(v.rstrip("s"))
-
-assert cfg["schema_version"] == "1.0.0"
-assert cfg["feature_name"] == os.environ.get("FEATURE_NAME", cfg["feature_name"])
-
-# Enforce CEL rules
-header_read = parse_seconds(cfg["server"]["header_read_timeout"])
-idle = parse_seconds(cfg["server"]["idle_connection_timeout"])
-lb_idle = parse_seconds(cfg["server"]["upstream_lb_idle_timeout"])
-
-assert header_read < idle, "CEL VIOLATION: header_read_timeout must be < idle_connection_timeout"
-assert lb_idle < idle, "CEL VIOLATION: upstream_lb_idle_timeout must be < idle_connection_timeout"
-
-prop_wait = parse_seconds(cfg["lifecycle"]["propagation_wait"])
-drain = parse_seconds(cfg["lifecycle"]["drain_deadline"])
-margin = parse_seconds(cfg["lifecycle"]["force_cleanup_margin"])
-kill = parse_seconds(cfg["lifecycle"]["orchestrator_kill_timeout"])
-
-assert (prop_wait + drain + margin) < kill, "CEL VIOLATION: Total drain time must be < orchestrator_kill_timeout"
-assert cfg["limits"]["max_body_bytes"] > 0, "max_body_bytes must be positive"
-
-print(">>> Step 2 SUCCESS: server-config.yml parsed and CEL invariants verified")
+    # 2. Enforce Kubernetes graceful drain margin invariant
+    total_drain = cfg.lifecycle.propagation_wait + cfg.lifecycle.drain_deadline + cfg.lifecycle.force_cleanup_margin
+    assert total_drain < cfg.lifecycle.orchestrator_kill_timeout, "CEL VIOLATION: Total drain time must be < orchestrator_kill_timeout"
+    
+    assert cfg.limits.max_body_bytes > 0, "max_body_bytes must be positive"
+    return STATUS_VERIFIED
 ```
 
-Run via:
-```bash
-python scripts/verify_server_config.py
+#### 2.5 Input/Output, Interconnection & Standalone Usage Reference
+
+- **Inputs Given**:
+```json
+{
+  "feature_name": "quality_baseline",
+  "allocated_ports": {
+    "public_bind": "0.0.0.0:8003",
+    "admin_bind": "127.0.0.1:9003"
+  },
+  "runtime_limits": {
+    "idle_connection_timeout": "65s",
+    "header_read_timeout": "10s",
+    "upstream_lb_idle_timeout": "60s",
+    "max_body_bytes": 10485760,
+    "global_admission_limit": 1000
+  }
+}
 ```
+
+- **Outputs Produced**:
+```yaml
+# Validated ${FEATURE_DIR}/server-config.yml
+schema_version: "1.0.0"
+feature_name: "quality_baseline"
+
+server:
+  public_bind: "0.0.0.0:8003"
+  admin_bind: "127.0.0.1:9003"
+  max_request_timeout: "60s"
+  idle_connection_timeout: "65s"
+  header_read_timeout: "10s"
+  upstream_lb_idle_timeout: "60s"
+  tls_mode: "off"
+
+lifecycle:
+  propagation_wait: "2s"
+  drain_deadline: "15s"
+  force_cleanup_margin: "3s"
+  orchestrator_kill_timeout: "30s"
+
+limits:
+  total_connection_cap: 10000
+  per_client_cap: 100
+  max_body_bytes: 10485760
+  global_admission_limit: 1000
+```
+
+- **How It Connects to Other Steps**:
+  - Upstream: Configured using the port numbers allocated in Step 1.
+  - Downstream: Loaded and compiled into a frozen `ServerSnapshot` by `ServerConfigurationService` in Step 3.
+- **How to Use Individually (Standalone Mode)**:
+  - Can be validated standalone with zero running microservices using the `VerifyServerConfig` algorithm.
 
 ---
 
@@ -1084,38 +1152,65 @@ The `ServerConfigurationService` parses the raw YAML, runs type coercion, and pr
 - Schema Validation: Checks IP addresses, ports, duration formats, and integer bounds.
 - Immutable Reference: The resulting snapshot is placed in `app.state.server_snapshot`. Handlers read from this immutable snapshot with zero lock contention.
 
-#### 3.2 Automated Validation Script
-Run this script to build the snapshot using the Python shared library:
+#### 3.2 Automated Verification Logic (Pseudocode)
+Validation of the compiled snapshot and dynamic port binding:
 
-```python
-# scripts/verify_server_snapshot.py
-import os
-import sys
-from pathlib import Path
-
-monorepo_root = Path(os.environ.get("MONOREPO_ROOT", "."))
-sys.path.insert(0, str(monorepo_root / "python-shared"))
-
-from src.features.server.server_configuration.service.server_config_service import ServerConfigurationService
-
-feature_dir = Path(os.environ.get("FEATURE_DIR", "."))
-service = ServerConfigurationService.from_file(feature_dir)
-snapshot = service.build_snapshot()
-
-expected_public = os.environ.get("PUBLIC_PORT", "8003")
-expected_admin = os.environ.get("ADMIN_PORT", "9003")
-
-assert snapshot.server.public_bind.endswith(str(expected_public))
-assert snapshot.server.admin_bind.endswith(str(expected_admin))
-assert snapshot.limits.total_connection_cap == 10000
-
-print(f">>> Step 3 SUCCESS: Server snapshot compiled: bind={snapshot.server.public_bind}, limits={snapshot.limits.max_body_bytes}B")
+```text
+algorithm VerifyServerSnapshot:
+    input: feature_dir = "${FEATURE_DIR}"
+    
+    service = ServerConfigurationService.from_file(feature_dir)
+    snapshot = service.build_snapshot()
+    
+    assert snapshot.server.public_bind.endswith(":8003")
+    assert snapshot.server.admin_bind.endswith(":9003")
+    assert snapshot.limits.total_connection_cap == 10000
+    assert snapshot.limits.max_body_bytes == 10485760
+    return STATUS_VERIFIED
 ```
 
-Run via:
-```bash
-python scripts/verify_server_snapshot.py
+#### 3.3 Input/Output, Interconnection & Standalone Usage Reference
+
+- **Inputs Given**:
+```json
+{
+  "feature_dir": "/home/btpl-lap-22/live/llm-obs-python-packages/quality-engine/src/features/quality_baseline",
+  "source_file": "server-config.yml"
+}
 ```
+
+- **Outputs Produced**:
+```json
+{
+  "snapshot_type": "ServerSnapshot",
+  "feature_name": "quality_baseline",
+  "server": {
+    "public_bind": "0.0.0.0:8003",
+    "admin_bind": "127.0.0.1:9003",
+    "idle_connection_timeout_seconds": 65.0,
+    "header_read_timeout_seconds": 10.0,
+    "tls_mode": "off"
+  },
+  "lifecycle": {
+    "propagation_wait_seconds": 2.0,
+    "drain_deadline_seconds": 15.0,
+    "force_cleanup_margin_seconds": 3.0,
+    "orchestrator_kill_timeout_seconds": 30.0
+  },
+  "limits": {
+    "total_connection_cap": 10000,
+    "max_body_bytes": 10485760,
+    "global_admission_limit": 1000
+  },
+  "immutability": "FROZEN_PYDANTIC_MODEL"
+}
+```
+
+- **How It Connects to Other Steps**:
+  - Upstream: Reads the validated `server-config.yml` from Step 2.
+  - Downstream: Passed into Step 4's `create_app()` factory and attached to `app.state.server_snapshot`.
+- **How to Use Individually (Standalone Mode)**:
+  - Can be built and validated offline in unit tests to assert schema correctness.
 
 ---
 
@@ -1160,37 +1255,55 @@ def create_app() -> FastAPI:
     return app
 ```
 
-#### 4.3 Automated Verification Script
-Run this script to assert that `create_app()` instantiates the application correctly:
+#### 4.3 Automated Verification Logic (Pseudocode)
+Validation of the initialized application state and middleware mounting:
 
-```python
-# scripts/verify_app_factory.py
-import os
-import sys
-import importlib.util
-from pathlib import Path
-
-monorepo_root = Path(os.environ.get("MONOREPO_ROOT", "."))
-sys.path.insert(0, str(monorepo_root / "python-shared"))
-pkg_name = os.environ.get("PACKAGE_NAME", "quality-engine")
-sys.path.insert(0, str(monorepo_root / pkg_name))
-
-app_path = monorepo_root / pkg_name / "src" / "api" / "rest" / "v1" / "app.py"
-spec = importlib.util.spec_from_file_location("app_mod", app_path)
-mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mod)
-
-app = mod.create_app()
-assert hasattr(app.state, "server_snapshot"), "app.state.server_snapshot missing"
-public_port = os.environ.get("PUBLIC_PORT", "8003")
-assert app.state.server_snapshot.server.public_bind.endswith(str(public_port))
-print(">>> Step 4 SUCCESS: FastAPI application created with attached snapshot and telemetry middleware")
+```text
+algorithm VerifyAppFactory:
+    app = create_app()
+    assert app.state.has_property("server_snapshot")
+    assert app.state.server_snapshot.server.public_bind.endswith(":8003")
+    assert app.has_middleware("CorrelationAndTelemetryMiddleware")
+    assert app.state.is_draining == false
+    return STATUS_VERIFIED
 ```
 
-Run via:
-```bash
-python scripts/verify_app_factory.py
+#### 4.4 Input/Output, Interconnection & Standalone Usage Reference
+
+- **Inputs Given**:
+```json
+{
+  "package_name": "quality-engine",
+  "injected_snapshot": {
+    "feature_name": "quality_baseline",
+    "public_bind": "0.0.0.0:8003",
+    "telemetry_header": "x-correlation-id"
+  }
+}
 ```
+
+- **Outputs Produced**:
+```json
+{
+  "fastapi_app": {
+    "title": "quality-engine API",
+    "version": "1.0.0",
+    "state": {
+      "server_snapshot": "INSTANTIATED",
+      "is_draining": false
+    },
+    "middleware_stack": [
+      "CorrelationAndTelemetryMiddleware"
+    ]
+  }
+}
+```
+
+- **How It Connects to Other Steps**:
+  - Upstream: Consumes `ServerSnapshot` built in Step 3.
+  - Downstream: Target for registering Problem Details handlers in Step 5 and Probes in Step 6; executed by Uvicorn in Step 7.
+- **How to Use Individually (Standalone Mode)**:
+  - Can be instantiated in unit test fixtures using `starlette.testclient.TestClient` without launching an external server.
 
 ---
 
@@ -1261,54 +1374,58 @@ def register_problem_details_handlers(app: FastAPI) -> None:
         )
 ```
 
-#### 5.3 Automated Verification Script
-Run this script to verify that unhandled exceptions are caught and formatted as RFC 9457:
+#### 5.3 Automated Verification Logic (Pseudocode)
+Validation of unhandled exception sanitization and RFC 9457 `application/problem+json` compliance:
 
-```python
-# scripts/verify_problem_details.py
-import os
-import sys
-import importlib.util
-from pathlib import Path
-from fastapi.testclient import TestClient
-
-monorepo_root = Path(os.environ.get("MONOREPO_ROOT", "."))
-sys.path.insert(0, str(monorepo_root / "python-shared"))
-pkg_name = os.environ.get("PACKAGE_NAME", "quality-engine")
-
-app_path = monorepo_root / pkg_name / "src" / "api" / "rest" / "v1" / "app.py"
-spec = importlib.util.spec_from_file_location("app_mod", app_path)
-app_mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(app_mod)
-
-err_path = monorepo_root / pkg_name / "src" / "api" / "rest" / "v1" / "error_handlers.py"
-spec2 = importlib.util.spec_from_file_location("err_mod", err_path)
-err_mod = importlib.util.module_from_spec(spec2)
-spec2.loader.exec_module(err_mod)
-
-app = app_mod.create_app()
-err_mod.register_problem_details_handlers(app)
-
-@app.get("/test-error")
-async def trigger_error():
-    raise RuntimeError("Simulated database panic")
-
-client = TestClient(app)
-resp = client.get("/test-error")
-assert resp.status_code == 500
-assert resp.headers["content-type"] == "application/problem+json"
-body = resp.json()
-assert body["type"].endswith("internal-server-error")
-assert "trace_id" in body
-assert "Simulated database panic" not in body["detail"], "LEAK: Raw exception string leaked in error detail!"
-
-print(">>> Step 5 SUCCESS: RFC 9457 problem details formatting verified")
+```text
+algorithm VerifyProblemDetailsFormatting:
+    app = create_app()
+    register_problem_details_handlers(app)
+    
+    # 1. Simulate unhandled server error
+    response = simulate_request(app, method="GET", path="/trigger-unhandled-panic")
+    assert response.status_code == 500
+    assert response.headers["content-type"] == "application/problem+json"
+    
+    # 2. Assert RFC 9457 schema properties
+    body = response.json()
+    assert body.type.endswith("internal-server-error")
+    assert body.contains("trace_id")
+    assert not body.detail.contains_raw_stack_trace(), "Sensitive stack trace leaked"
+    return STATUS_VERIFIED
 ```
 
-Run via:
-```bash
-python scripts/verify_problem_details.py
+#### 5.4 Input/Output, Interconnection & Standalone Usage Reference
+
+- **Inputs Given**:
+```json
+{
+  "request_context": {
+    "method": "POST",
+    "url": "http://0.0.0.0:8003/api/v1/quality/evaluate",
+    "trace_id": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+    "raised_exception": "RuntimeError('Database connection pool exhausted')"
+  }
+}
 ```
+
+- **Outputs Produced (RFC 9457 JSON Response)**:
+```json
+{
+  "type": "https://errors.monorepo.internal/problems/internal-server-error",
+  "title": "Internal Server Error",
+  "status": 500,
+  "detail": "An internal error occurred. Quote the trace_id when contacting engineering.",
+  "instance": "http://0.0.0.0:8003/api/v1/quality/evaluate",
+  "trace_id": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+}
+```
+
+- **How It Connects to Other Steps**:
+  - Upstream: Registered onto the `FastAPI` application created in Step 4.
+  - Downstream: Catches all errors from API routes and protects upstream callers from raw internal system details.
+- **How to Use Individually (Standalone Mode)**:
+  - Can be tested using `TestClient(app)` to simulate internal errors and assert problem details format.
 
 ---
 
@@ -1349,51 +1466,61 @@ def register_probes(app: FastAPI) -> None:
         return {"status": "READY", "bind": bind}
 ```
 
-#### 6.3 Automated Verification Script
-Run this script to verify probe behavior during normal and draining states:
+#### 6.3 Automated Verification Logic (Pseudocode)
+Validation of Kubernetes lifecycle probes during normal and draining phases:
 
-```python
-# scripts/verify_probes.py
-import os
-import sys
-import importlib.util
-from pathlib import Path
-from fastapi.testclient import TestClient
-
-monorepo_root = Path(os.environ.get("MONOREPO_ROOT", "."))
-sys.path.insert(0, str(monorepo_root / "python-shared"))
-pkg_name = os.environ.get("PACKAGE_NAME", "quality-engine")
-
-app_path = monorepo_root / pkg_name / "src" / "api" / "rest" / "v1" / "app.py"
-spec = importlib.util.spec_from_file_location("app_mod", app_path)
-app_mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(app_mod)
-
-probe_path = monorepo_root / pkg_name / "src" / "api" / "rest" / "v1" / "probes.py"
-spec2 = importlib.util.spec_from_file_location("probe_mod", probe_path)
-probe_mod = importlib.util.module_from_spec(spec2)
-spec2.loader.exec_module(probe_mod)
-
-app = app_mod.create_app()
-probe_mod.register_probes(app)
-client = TestClient(app)
-
-assert client.get("/healthz").status_code == 200
-assert client.get("/livez").status_code == 200
-assert client.get("/readyz").status_code == 200
-
-# Simulate draining phase
-app.state.is_draining = True
-drain_resp = client.get("/readyz")
-assert drain_resp.status_code == 503, "Readiness probe must return 503 during draining phase!"
-
-print(">>> Step 6 SUCCESS: Kubernetes health, liveness, and draining probes verified")
+```text
+algorithm VerifyKubernetesProbes:
+    app = create_app()
+    register_probes(app)
+    
+    # 1. Normal state: all probes healthy
+    assert simulate_get(app, "/healthz").status_code == 200
+    assert simulate_get(app, "/livez").status_code == 200
+    assert simulate_get(app, "/readyz").status_code == 200
+    
+    # 2. Graceful draining state: readiness probe returns 503
+    app.state.is_draining = true
+    drain_resp = simulate_get(app, "/readyz")
+    assert drain_resp.status_code == 503, "Readiness probe must return 503 while draining"
+    return STATUS_VERIFIED
 ```
 
-Run via:
-```bash
-python scripts/verify_probes.py
+#### 6.4 Input/Output, Interconnection & Standalone Usage Reference
+
+- **Inputs Given**:
+```json
+{
+  "probe_requests": [
+    { "endpoint": "/healthz", "expected_during_healthy": 200 },
+    { "endpoint": "/livez", "expected_during_healthy": 200 },
+    { "endpoint": "/readyz", "expected_during_healthy": 200, "expected_during_draining": 503 }
+  ]
+}
 ```
+
+- **Outputs Produced**:
+```json
+{
+  "normal_phase_responses": {
+    "/healthz": { "status": "HEALTHY", "version": "1.0.0" },
+    "/livez": { "status": "ALIVE" },
+    "/readyz": { "status": "READY", "bind": "0.0.0.0:8003" }
+  },
+  "draining_phase_response": {
+    "/readyz": {
+      "http_status": 503,
+      "body": { "status": "DRAINING", "detail": "Server is shutting down" }
+    }
+  }
+}
+```
+
+- **How It Connects to Other Steps**:
+  - Upstream: Registered onto the `FastAPI` instance created in Step 4.
+  - Downstream: Scraped continuously by Kubernetes Kubelet and AWS ALB / GCP LB health checkers.
+- **How to Use Individually (Standalone Mode)**:
+  - Can be tested via HTTP client without container orchestration.
 
 ---
 
@@ -1448,36 +1575,56 @@ if __name__ == "__main__":
     main()
 ```
 
-#### 7.3 Automated Verification Script
-Run this script to verify runner configuration compatibility:
+#### 7.3 Automated Verification Logic (Pseudocode)
+Validation of runtime socket options and admission limits passed into the runner:
 
-```python
-# scripts/verify_runner_config.py
-import os
-import sys
-from pathlib import Path
-
-monorepo_root = Path(os.environ.get("MONOREPO_ROOT", "."))
-sys.path.insert(0, str(monorepo_root / "python-shared"))
-
-from src.features.server.server_configuration.service.server_config_service import ServerConfigurationService
-
-feature_dir = Path(os.environ.get("FEATURE_DIR", "."))
-snapshot = ServerConfigurationService.from_file(feature_dir).build_snapshot()
-
-host, port = snapshot.server.public_bind.split(":")
-assert host == "0.0.0.0"
-expected_port = int(os.environ.get("PUBLIC_PORT", port))
-assert int(port) == expected_port
-assert int(snapshot.server.idle_connection_timeout.rstrip("s")) == 65
-
-print(f">>> Step 7 SUCCESS: Runner configuration verified for host {host}:{port}")
+```text
+algorithm VerifyRunnerConfiguration:
+    input: feature_dir = "${FEATURE_DIR}"
+    
+    snapshot = ServerConfigurationService.from_file(feature_dir).build_snapshot()
+    host, port = parse_host_port(snapshot.server.public_bind)
+    
+    assert host == "0.0.0.0"
+    assert port == 8003
+    assert snapshot.server.idle_connection_timeout == "65s"
+    assert snapshot.limits.global_admission_limit == 1000
+    return STATUS_VERIFIED
 ```
 
-Run via:
-```bash
-python scripts/verify_runner_config.py
+#### 7.4 Input/Output, Interconnection & Standalone Usage Reference
+
+- **Inputs Given**:
+```json
+{
+  "runner_bindings": {
+    "host": "0.0.0.0",
+    "port": 8003,
+    "timeout_keep_alive": 65,
+    "limit_concurrency": 1000,
+    "backlog": 1024
+  }
+}
 ```
+
+- **Outputs Produced**:
+```json
+{
+  "server_process": {
+    "status": "RUNNING",
+    "engine": "uvicorn",
+    "ingress_url": "http://0.0.0.0:8003",
+    "max_concurrent_requests": 1000,
+    "graceful_shutdown_enabled": true
+  }
+}
+```
+
+- **How It Connects to Other Steps**:
+  - Upstream: Composes app from Step 4, error handlers from Step 5, and probes from Step 6.
+  - Downstream: Deployed to Kubernetes Pods, Docker containers, or local developer terminals.
+- **How to Use Individually (Standalone Mode)**:
+  - Can be started directly via `python src/main.py`.
 
 ---
 
@@ -1488,57 +1635,64 @@ Live ingress testing verifies end-to-end integration:
 - W3C `traceparent` and correlation IDs are reflected in response headers.
 - Requests exceeding `limits.max_body_bytes` (10 MiB) are rejected with HTTP 413.
 
-#### 8.2 Operational Ingress Smoke Test Suite
+#### 8.2 Operational Ingress Verification Logic (Pseudocode)
+Validation of end-to-end wire ingress, telemetry propagation, and payload enforcement:
 
-Target File: `tests/test_live_ingress.py`
-
-```python
-import os
-import sys
-import importlib.util
-from pathlib import Path
-from fastapi.testclient import TestClient
-
-monorepo_root = Path(os.environ.get("MONOREPO_ROOT", "."))
-sys.path.insert(0, str(monorepo_root / "python-shared"))
-pkg_name = os.environ.get("PACKAGE_NAME", "quality-engine")
-
-app_path = monorepo_root / pkg_name / "src" / "api" / "rest" / "v1" / "app.py"
-spec = importlib.util.spec_from_file_location("app_mod", app_path)
-app_mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(app_mod)
-
-probe_path = monorepo_root / pkg_name / "src" / "api" / "rest" / "v1" / "probes.py"
-spec2 = importlib.util.spec_from_file_location("probe_mod", probe_path)
-probe_mod = importlib.util.module_from_spec(spec2)
-spec2.loader.exec_module(probe_mod)
-
-app = app_mod.create_app()
-probe_mod.register_probes(app)
-client = TestClient(app)
-
-# 1. Ingress Normal Request with Correlation Header
-resp = client.get(
-    "/healthz",
-    headers={
+```text
+algorithm VerifyLiveIngress:
+    client = create_test_client(create_app_with_probes())
+    
+    # 1. Verify W3C traceparent and correlation header echo
+    res = client.get("/healthz", headers={
         "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
         "x-correlation-id": "test-corr-456"
-    }
-)
-assert resp.status_code == 200
-assert resp.headers.get("x-correlation-id") == "test-corr-456", "Correlation header failed to reflect!"
-print(">>> Step 8.1 SUCCESS: Ingress W3C and correlation headers verified")
-
-# 2. Oversized Payload Verification
-oversized_payload = b"0" * (10485760 + 1024)  # 10 MiB + 1 KiB
-print(">>> Step 8.2 SUCCESS: Sizing and limits verified")
-print(">>> ALL 8 STEPS SUCCESSFULLY VERIFIED!")
+    })
+    assert res.status_code == 200
+    assert res.headers["x-correlation-id"] == "test-corr-456", "Correlation header not echoed"
+    
+    # 2. Verify payload size protection
+    oversized_body = generate_bytes(size=10485760 + 1024)
+    assert_body_rejected_or_capped(client, oversized_body)
+    return STATUS_VERIFIED
 ```
 
-Run via:
-```bash
-python tests/test_live_ingress.py
+#### 8.3 Input/Output, Interconnection & Standalone Usage Reference
+
+- **Inputs Given (Ingress Test Request with Telemetry Headers)**:
+```json
+{
+  "method": "GET",
+  "url": "http://0.0.0.0:8003/healthz",
+  "headers": {
+    "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+    "x-correlation-id": "test-corr-456"
+  }
+}
 ```
+
+- **Outputs Produced (Ingress Response Reflecting Headers)**:
+```json
+{
+  "status_code": 200,
+  "headers": {
+    "content-type": "application/json",
+    "x-correlation-id": "test-corr-456"
+  },
+  "body": {
+    "status": "HEALTHY",
+    "version": "1.0.0"
+  }
+}
+```
+
+- **How It Connects to Other Steps**:
+  - Upstream: Tests the live server assembled in Step 7.
+  - Downstream: Acts as automated smoke test in CI/CD pipelines before promotion to staging/production.
+- **How to Use Individually (Standalone Mode)**:
+  - Can be run against any running instance via `curl`:
+    ```bash
+    curl -i -H "x-correlation-id: test-1" http://127.0.0.1:8003/healthz
+    ```
 
 
 ---
