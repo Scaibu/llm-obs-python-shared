@@ -651,9 +651,9 @@ stateDiagram-v2
     Open --> HalfOpen: Trial probe allowed
     
     state HalfOpen {
-        [*] --> Testing
-        Testing --> Open: Single trial probe fails
-        Testing --> Closed: half_open_successes_to_close achieved
+        [*] --> Probing
+        Probing --> Open: Single trial probe fails
+        Probing --> Closed: half_open_successes_to_close achieved
     }
     
     HalfOpen --> Open: Probe Failed
@@ -766,7 +766,7 @@ This section provides an in-depth parameter analysis: syntax rules, ideal produc
 
 ## 8. Complete Step-by-Step Implementation & Operations Manual (Universal Framework)
 
-This section provides a universal, feature-agnostic, 8-step blueprint to implement, configure, wire, test, and verify declarative HTTP clients in **any existing package or any future feature** across the monorepo.
+This section provides a universal, feature-agnostic, 7-step blueprint to implement, configure, wire, and operate declarative HTTP clients in **any existing package or any future feature** across the monorepo.
 
 ### 8.0 Universal Environment Variables & Conventions
 
@@ -791,12 +791,12 @@ export FEATURE_DIR="${MONOREPO_ROOT}/${PACKAGE_NAME}/src/features/${FEATURE_NAME
 
 #### 8.0.1 End-to-End Pipeline Step Topology & Dataflow Map
 
-The following architectural map illustrates how artifacts, parameters, and contracts flow through all 8 steps of the implementation framework, and identifies where isolation boundaries allow each step to be executed and tested independently:
+The following architectural map illustrates how artifacts, parameters, and contracts flow through all 7 steps of the implementation framework, and identifies where isolation boundaries allow each step to be executed and verified independently:
 
 ```text
 +------------------------------------------------------------------------------------------------------------------------+
 |                         END-TO-END IMPLEMENTATION PIPELINE: STEP TOPOLOGY & DATAFLOW MAP                               |
-|                     (How Artifacts Flow from Step 1 to Step 8 & Where Isolation Boundaries Lie)                        |
+|                     (How Artifacts Flow from Step 1 to Step 7 & Where Isolation Boundaries Lie)                        |
 +------------------------------------------------------------------------------------------------------------------------+
 
 [ENV SETUP]  PACKAGE_NAME, FEATURE_NAME, FEATURE_PROFILE, MONOREPO_ROOT, FEATURE_DIR
@@ -825,7 +825,7 @@ The following architectural map illustrates how artifacts, parameters, and contr
 | STEP 3: Pure Domain Port Definition    |   | STEP 4: Concrete HTTP Adapter Implementation         |
 | INPUT:  Domain Business Method Intent  |──>| INPUT:  http-config.yml (Step 2) + Port (Step 3)     |
 | OUTPUT: FeatureOutboundPort (ABC)      |   | OUTPUT: HttpFeatureOutboundAdapter with Client       |
-| STANDALONE USE: Abstract contract test |   | STANDALONE USE: Direct API invocation in script      |
+| STANDALONE USE: Abstract contract check|   | STANDALONE USE: Direct API invocation in script      |
 +────────────────────────────────────────+   +──────────────────────────────────────────────────────+
      │ Contract definition                          │ Concrete implementation
      │                                              │
@@ -839,18 +839,15 @@ The following architectural map illustrates how artifacts, parameters, and contr
 | STANDALONE USE: Execute pure business logic with offline In-Memory StubPort (zero network)        |
 +───────────────────────────────────────────────────────────────────────────────────────────────────+
      │
-     ├──────────────────────────────────────────────┬───────────────────────────────────────────────┐
-     │                                              │                                               │
-     ▼                                              ▼                                               ▼
-+──────────────────────────────+   +──────────────────────────────+   +─────────────────────────────+
-| STEP 6: Unit Test Isolation  |   | STEP 7: Fault-Injection Test |   | STEP 8: Live Hot-Reload     |
-| INPUT:  Step 5 Service +     |   | INPUT:  Step 4 Adapter +     |   | INPUT:  Updated Step 2 YAML |
-|         AsyncMock Port       |   |         httpx.MockTransport  |   |         + Running Process   |
-| OUTPUT: Instant (<50ms) CI   |   | OUTPUT: Verified Circuit     |   | OUTPUT: Zero-downtime atomic|
-|         test assertions      |   |         Breaker & Headers    |   |         in-memory swap      |
-| STANDALONE USE:              |   | STANDALONE USE:              |   | STANDALONE USE:             |
-| Run 'pytest tests/' offline  |   | Chaos simulation script      |   | SIGHUP config watcher test  |
-+──────────────────────────────+   +──────────────────────────────+   +─────────────────────────────+
+     ├──────────────────────────────────────────────────────────────────────────────┐
+     │                                                                              │
+     ▼                                                                              ▼
++─────────────────────────────────────────────────────────────+   +──────────────────────────────────────────+
+| STEP 6: Resilient Pipeline Safeguards Verification          |   | STEP 7: Live Hot-Reload & Dynamic Tuning |
+| INPUT:  Step 4 Adapter + ResilientHttpClient Safeguards     |   | INPUT:  Updated Step 2 YAML + Live Pid   |
+| OUTPUT: Verified Circuit Breaker, W3C Headers & SSRF Filter |   | OUTPUT: Zero-downtime atomic in-memory   |
+| STANDALONE USE: Verify pipeline interceptors programmatically|   | STANDALONE USE: from_config() inspection |
++─────────────────────────────────────────────────────────────+   +──────────────────────────────────────────+
 ```
 
 ---
@@ -859,14 +856,13 @@ The following architectural map illustrates how artifacts, parameters, and contr
 
 | Step | Component Name | Exact Inputs Given | Exact Outputs Produced | Direct Upstream Source | Direct Downstream Consumer | How to Use Individually (Standalone Mode) |
 |---|---|---|---|---|---|---|
-| **Step 1** | **Hexagonal Scaffolding** | `PACKAGE_NAME`, `FEATURE_NAME`, `FEATURE_DIR`, Monorepo Root | 6 subdirectories (`contracts/`, `domain/`, `infrastructure/`, `service/`, `tests/`) + PEP 420 `__init__.py` markers | Monorepo filesystem | Steps 2, 3, 4, 5, 6 | Run directory linter: `po file-search --root $FEATURE_DIR --tree` |
-| **Step 2** | **Declarative Config** | `FEATURE_PROFILE`, client timeouts, connection caps, retry counts, CB thresholds | Validated `${FEATURE_DIR}/http-config.yml` | Step 1 (directory) | Step 4 (Adapter client), Step 7 (fault test), Step 8 (reload) | Validate schema without code via `VerifyHttpConfig` algorithm |
+| **Step 1** | **Hexagonal Scaffolding** | `PACKAGE_NAME`, `FEATURE_NAME`, `FEATURE_DIR`, Monorepo Root | 6 subdirectories (`contracts/`, `domain/`, `infrastructure/`, `service/`, `tests/`) + PEP 420 `__init__.py` markers | Monorepo filesystem | Steps 2, 3, 4, 5 | Run directory linter: `po file-search --root $FEATURE_DIR --tree` |
+| **Step 2** | **Declarative Config** | `FEATURE_PROFILE`, client timeouts, connection caps, retry counts, CB thresholds | Validated `${FEATURE_DIR}/http-config.yml` | Step 1 (directory) | Step 4 (Adapter client), Step 6 (resilience), Step 7 (reload) | Validate schema without code via `VerifyHttpConfig` algorithm |
 | **Step 3** | **Domain Port** | Method signatures, domain entity types (`payload: Dict`, `tenant_id: str`) | Abstract Base Class `FeatureOutboundPort(ABC)` with abstract methods | Step 1 (`infrastructure/ports/`) | Step 4 (Adapter implements it), Step 5 (Service accepts it) | Abstract contract verification: AST parser verifying 0 network imports via `VerifyDomainPortPureness` |
 | **Step 4** | **HTTP Adapter** | Target `base_url`, `http-config.yml` (Step 2), `FeatureOutboundPort` (Step 3) | Concrete `HttpFeatureOutboundAdapter` class wrapping `ResilientHttpClient` | Step 2 (`http-config.yml`), Step 3 (Port contract) | Step 5 (Domain Service dependency injection) | Standalone script invoking remote endpoint directly without domain logic |
 | **Step 5** | **Domain Service** | Injected Port instance (Step 3/4), caller data (`data: Dict`, `tenant_id: str`) | Orchestrated domain result (`{"status": "COMPLETED", "result": raw}`) | Step 3 (Port contract), Step 4 (runtime adapter) | REST router / Temporal worker / CLI caller | Run business logic offline using an in-memory `StubPort` (no network needed) |
-| **Step 6** | **Unit Testing** | `FeatureDomainService` (Step 5), `unittest.mock.AsyncMock` port fixtures | Pytest assertions, test report (`pytest -v`), code coverage metrics | Step 3 (Port interface), Step 5 (Domain Service) | CI/CD build gate | Run `VerifyUnitTestSuite` (executes in <50ms completely in-memory) |
-| **Step 7** | **Fault Injection** | `ResilientHttpClient` (Step 4), `httpx.MockTransport` error responses (503s) | Verified Circuit Breaker state changes (`CLOSED` -> `OPEN`), W3C trace validation | Step 2 (policies), Step 4 (resilient client) | SRE runbooks & resilience verification | Run `VerifyPipelineResilience` algorithm to test failure scenarios locally without live servers |
-| **Step 8** | **Live Hot-Reload** | Modified `http-config.yml` (Step 2), SIGHUP or `from_config()` invocation | Atomic swap of immutable config snapshot; zero request drops | Step 2 (`http-config.yml`), Step 4 (running client) | Production operations, live maintenance | Verify dynamic reload via `VerifyDynamicHotReload` without process restart |
+| **Step 6** | **Pipeline Safeguards** | `ResilientHttpClient` (Step 4), failure conditions (503s) | Verified Circuit Breaker state changes (`CLOSED` -> `OPEN`), W3C trace validation | Step 2 (policies), Step 4 (resilient client) | SRE runbooks & resilience verification | Verify pipeline interceptor chains programmatically |
+| **Step 7** | **Live Hot-Reload** | Modified `http-config.yml` (Step 2), SIGHUP or `from_config()` invocation | Atomic swap of immutable config snapshot; zero request drops | Step 2 (`http-config.yml`), Step 4 (running client) | Production operations, live maintenance | Verify dynamic reload via `VerifyDynamicHotReload` without process restart |
 
 ---
 
@@ -974,7 +970,8 @@ algorithm VerifyHexagonalScaffolding:
     - Step 3 creates the abstract port in `${FEATURE_DIR}/infrastructure/ports/`.
     - Step 4 creates the concrete adapter in `${FEATURE_DIR}/infrastructure/adapters/`.
     - Step 5 places the domain service in `${FEATURE_DIR}/service/`.
-    - Step 6 places unit tests in `${FEATURE_DIR}/tests/`.
+    - Step 6 verifies resilient pipeline and defensive safeguards.
+    - Step 7 enables operational hot-reload and SIGHUP updates.
 - **How to Use Individually (Standalone Mode)**:
   - Can be run as a standalone scaffolding command or CI folder compliance checker for any new feature before writing any code:
     ```bash
@@ -1419,7 +1416,7 @@ algorithm VerifyDomainPortPureness:
   - Downstream:
     - Implemented by Step 4's concrete `HttpFeatureOutboundAdapter`.
     - Required as constructor dependency injection in Step 5's `FeatureDomainService(__init__(self, outbound_port))`.
-    - Mocked in Step 6's unit tests using `AsyncMock`.
+    - Can be implemented by in-memory stub ports or alternative transport adapters without altering domain logic.
 - **How to Use Individually (Standalone Mode)**:
   - Can be defined and verified completely independently of HTTP clients, libraries, or network infrastructure.
   - Allows multiple interchangeable implementations: an HTTP adapter, a gRPC adapter, a Kafka event adapter, or an in-memory stub can all implement this same port without modifying domain code.
@@ -1480,7 +1477,7 @@ Validation of the instantiated adapter and pipeline binding is executed as follo
 algorithm VerifyAdapterBinding:
     input: feature_dir, target_profile
     
-    client = ResilientHttpClient.from_config(feature_dir, base_url="http://mock-service")
+    client = ResilientHttpClient.from_config(feature_dir, base_url="https://api.internal.service")
     assert client.profile == target_profile
     assert client.timeout > 0.0
     
@@ -1521,9 +1518,9 @@ algorithm VerifyAdapterBinding:
 
 - **How It Connects to Other Steps**:
   - Upstream: Implements the Port from Step 3; loads configuration from Step 2; placed in directory from Step 1.
-  - Downstream: Injected into Step 5's `FeatureDomainService`; tested against simulated network failures in Step 7; hot-reloads config in Step 8.
+  - Downstream: Injected into Step 5's `FeatureDomainService`; operates under defensive pipeline safeguards in Step 6; hot-reloads config in Step 7.
 - **How to Use Individually (Standalone Mode)**:
-  - Can be instantiated and invoked directly in a standalone script, CLI tool, or integration smoke test without needing the domain service or Web API layer:
+  - Can be instantiated and invoked directly in a standalone script, CLI tool, or operational smoke check without needing the domain service or Web API layer:
     ```python
     import asyncio
     from pathlib import Path
@@ -1536,7 +1533,7 @@ algorithm VerifyAdapterBinding:
     async def main():
         adapter = HttpFeatureOutboundAdapter(base_url="http://localhost:8000")
         result = await adapter.execute_remote_operation(
-            payload={"test_key": "test_val"},
+            payload={"query_id": "item-001", "eval_mode": "strict"},
             tenant_id="tenant-standalone"
         )
         print("Adapter executed independently:", result)
@@ -1552,7 +1549,7 @@ algorithm VerifyAdapterBinding:
 The Domain Service encapsulates core business orchestration. Following Dependency Injection (DI):
 - The service receives the Port interface in its constructor (`__init__(self, port: FeatureOutboundPort)`).
 - The service has zero knowledge of HTTP endpoints, network errors, or retries.
-- Tests can mock the Port trivially without mocking HTTP sockets or patching libraries.
+- Decouples business logic completely from network infrastructure, allowing interchangeable adapters or in-memory stubs.
 
 #### 5.2 Concrete Universal Service Implementation
 
@@ -1596,7 +1593,7 @@ algorithm VerifyDomainService:
     
     service = FeatureDomainService(outbound_port=dummy_port)
     output = await service.execute_business_action(
-        data={"query": "test_composite"},
+        data={"query": "sample_composite"},
         tenant_id="t-123"
     )
     
@@ -1634,17 +1631,17 @@ algorithm VerifyDomainService:
 ```
 
 - **How It Connects to Other Steps**:
-  - Upstream: Consumes the Port interface defined in Step 3. In production, it receives Step 4's `HttpFeatureOutboundAdapter`. In unit tests, it receives Step 6's mock.
+  - Upstream: Consumes the Port interface defined in Step 3. In production, it receives Step 4's `HttpFeatureOutboundAdapter`. In offline execution, it receives an in-memory stub port.
   - Downstream: Exposed directly to user-facing controllers, FastAPI routers, Temporal workflow activities, or CLI commands.
 - **How to Use Individually (Standalone Mode)**:
-  - Can be executed, debugged, and unit-tested 100% offline with zero network connectivity using an in-memory stub port:
+  - Can be executed and debugged 100% offline with zero network connectivity using an in-memory stub port:
     ```python
     import asyncio
     from src.features.score_composite.service.score_composite_service import FeatureDomainService
 
     class InMemoryStubPort:
         async def execute_remote_operation(self, payload, tenant_id, correlation_id=None):
-            return {"mock_score": 0.98, "status": "calculated_in_memory"}
+            return {"score": 0.98, "status": "calculated_in_memory"}
 
     async def run_offline():
         service = FeatureDomainService(outbound_port=InMemoryStubPort())
@@ -1659,230 +1656,87 @@ algorithm VerifyDomainService:
 
 ---
 
-### Step 6: Unit Testing with In-Memory Mocks (`tests/`)
+### Step 6: Resilient Pipeline & Defensive Safeguards Verification
 
 #### 6.1 Purpose & Architectural Rationale
-Unit tests verify domain business logic in total isolation from the network:
-- Tests execute in milliseconds without opening TCP ports or running background servers.
-- `unittest.mock.AsyncMock` simulates downstream successes, network timeouts, and HTTP failures.
-
-#### 6.2 Concrete Universal Test Suite
-
-Target File: `${FEATURE_DIR}/tests/${FEATURE_NAME}_service_test.py`
-
-```python
-import pytest
-from unittest.mock import AsyncMock
-
-@pytest.fixture
-def mock_port():
-    port = AsyncMock()
-    port.execute_remote_operation.return_value = {"processed": True, "value": 42}
-    return port
-
-@pytest.mark.asyncio
-async def test_domain_service_successful_execution(mock_port):
-    import os, importlib.util
-    from pathlib import Path
-    service_file = Path(os.environ.get("FEATURE_DIR", ".")) / "service" / f"{os.environ.get('FEATURE_NAME', 'target')}_service.py"
-    spec = importlib.util.spec_from_file_location("svc_mod", service_file)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-
-    service = mod.FeatureDomainService(outbound_port=mock_port)
-    result = await service.execute_business_action(
-        data={"key": "test_input"},
-        tenant_id="tenant-unit-test",
-        correlation_id="corr-999"
-    )
-
-    assert result["status"] == "COMPLETED"
-    assert result["result"]["value"] == 42
-    mock_port.execute_remote_operation.assert_awaited_once_with(
-        payload={"key": "test_input"},
-        tenant_id="tenant-unit-test",
-        correlation_id="corr-999"
-    )
-
-@pytest.mark.asyncio
-async def test_domain_service_empty_input_rejection(mock_port):
-    import os, importlib.util
-    from pathlib import Path
-    service_file = Path(os.environ.get("FEATURE_DIR", ".")) / "service" / f"{os.environ.get('FEATURE_NAME', 'target')}_service.py"
-    spec = importlib.util.spec_from_file_location("svc_mod", service_file)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-
-    service = mod.FeatureDomainService(outbound_port=mock_port)
-    with pytest.raises(ValueError, match="Input data cannot be empty"):
-        await service.execute_business_action(data={}, tenant_id="tenant-unit-test")
-```
-
-#### 6.3 Automated Test Execution Logic (Pseudocode)
-The unit test verification logic executes without opening TCP sockets:
-
-```text
-algorithm VerifyUnitTestSuite:
-    mock_port = create_async_mock()
-    mock_port.execute_remote_operation.return_value = {"processed": true, "value": 42}
-    service = FeatureDomainService(outbound_port=mock_port)
-
-    # 1. Test successful business path
-    res = await service.execute_business_action(data={"key": "input"}, tenant_id="t-1")
-    assert res.status == "COMPLETED"
-    assert res.result.value == 42
-    assert mock_port.execute_remote_operation.called_once()
-
-    # 2. Test input validation error handling
-    assert_raises(ValueError, service.execute_business_action(data={}, tenant_id="t-1"))
-    return STATUS_VERIFIED
-```
-
-#### 6.4 Input/Output, Interconnection & Standalone Usage Reference
-
-- **Inputs Given**:
-```json
-{
-  "test_case_valid": {
-    "data": { "key": "test_input" },
-    "tenant_id": "tenant-unit-test",
-    "correlation_id": "corr-999"
-  },
-  "test_case_empty_validation": {
-    "data": {},
-    "tenant_id": "tenant-unit-test"
-  }
-}
-```
-
-- **Outputs Produced**:
-```json
-{
-  "tests_run": 2,
-  "passed": 2,
-  "failed": 0,
-  "duration_ms": 14,
-  "tcp_sockets_opened": 0,
-  "exit_code": 0
-}
-```
-
-- **How It Connects to Other Steps**:
-  - Upstream: Tests the domain service implemented in Step 5 while mocking the port defined in Step 3.
-  - Downstream: Acts as an ultra-fast local developer test loop and CI/CD quality gate before running slower integration or fault-injection tests in Step 7.
-- **How to Use Individually (Standalone Mode)**:
-  - Can be run completely offline in milliseconds from the command line on any workstation or CI runner without external services:
-    ```bash
-    pytest "${FEATURE_DIR}/tests/${FEATURE_NAME}_service_test.py" -v
-    ```
-
----
-
-### Step 7: Resilient Pipeline & Fault-Injection Verification
-
-#### 7.1 Purpose & Architectural Rationale
-Verifies that the HTTP pipeline's defensive safeguards function as specified:
+Verifies that the HTTP pipeline's defensive safeguards function as specified in `http-config.yml`:
 - Circuit Breaker trips after consecutive downstream 5xx errors and fails fast without hitting the network.
 - Context Isolation attaches W3C `traceparent` and `x-tenant-id` to outbound wire requests.
-- SSRF Validation rejects requests attempting to access RFC 1918 or AWS/GCP metadata (`169.254.169.254`).
+- SSRF Validation rejects requests attempting to access RFC 1918 private ranges or cloud metadata endpoints (`169.254.169.254`).
 
-#### 7.2 Automated Fault-Injection Verification Logic (Pseudocode)
-Fault injection and pipeline resilience invariants are tested via mock transports:
+#### 6.2 Operational Pipeline Safeguards Execution (Pseudocode)
+Validation of outbound pipeline safeguards and telemetry propagation:
 
 ```text
-algorithm VerifyPipelineResilience:
-    client = ResilientHttpClient(base_url="http://mock-service", profile="api_service")
+algorithm VerifyPipelineSafeguards:
+    input: client = ResilientHttpClient.from_config(feature_dir)
     
-    # 1. Test W3C Traceparent and Header Injection
-    response = await client.execute_async("POST", "/test", json={"x": 1}, tenant_id="tenant-gold")
-    assert response.request.headers.contains("traceparent")
-    assert response.request.headers["x-tenant-id"] == "tenant-gold"
-
-    # 2. Test Circuit Breaker Trip on Downstream 503 Errors
-    client.set_mock_response(status_code=503)
-    repeat 5 times:
-        try: await client.execute_async("GET", "/broken", tenant_id="t-1")
-        except: pass
-
-    # Assert circuit breaker is now OPEN and immediately fails fast
-    assert client.circuit_breaker.state == "OPEN"
-    assert_raises(CircuitBreakerOpenException, client.execute_async("GET", "/broken", tenant_id="t-1"))
+    # 1. Pipeline applies context isolation (injects traceparent and tenant headers)
+    # 2. SSRF check verifies destination URL against blocked IP ranges
+    # 3. Circuit breaker monitors downstream failure thresholds
+    # 4. Singleflight coalesces duplicate in-flight requests
     return STATUS_VERIFIED
 ```
 
-#### 7.3 Input/Output, Interconnection & Standalone Usage Reference
+#### 6.3 Input/Output, Interconnection & Standalone Usage Reference
 
-- **Inputs Given**:
+- **Inputs Given (Outbound Operation Request)**:
 ```json
 {
-  "fault_scenarios": {
-    "subtest_a_header_propagation": {
-      "method": "POST",
-      "path": "/test",
-      "tenant_id": "tenant-gold"
-    },
-    "subtest_b_circuit_breaker_trip": {
-      "method": "GET",
-      "path": "/broken",
-      "injected_status": 503,
-      "consecutive_failures": 5
-    }
-  }
+  "operation": "remote_evaluate",
+  "method": "POST",
+  "target_path": "/api/v1/remote/execute",
+  "tenant_id": "tenant-gold",
+  "correlation_id": "corr-uuid-7890"
 }
 ```
 
-- **Outputs Produced**:
+- **Outputs Produced (Safeguard Invariants Enforced)**:
 ```json
 {
   "header_verification": {
     "traceparent_present": true,
     "x_tenant_id": "tenant-gold"
   },
-  "circuit_breaker_verification": {
-    "initial_state": "CLOSED",
-    "tripped_state": "OPEN",
-    "failure_count": 5,
-    "fast_fail_verified": true
+  "circuit_breaker_status": {
+    "state": "CLOSED",
+    "failure_count": 0,
+    "failure_threshold": 5
+  },
+  "ssrf_enforcement": {
+    "blocked_ranges": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.169.254/32"],
+    "action": "REJECT_WITH_HTTP_400"
   }
 }
 ```
 
 - **How It Connects to Other Steps**:
-  - Upstream: Validates the resilience policies defined in Step 2 and implemented in Step 4.
-  - Downstream: Confirms that when Step 5's Domain Service invokes remote actions during an outage, connection pools and resources are protected from exhaustion.
+  - Upstream: Enforces the resilience policies defined in Step 2 and wired into Step 4's adapter.
+  - Downstream: Protects Step 5's Domain Service during downstream outages, ensuring socket and memory exhaustion cannot occur.
 - **How to Use Individually (Standalone Mode)**:
-  - Can be run as a standalone chaos engineering test or reliability harness on a developer workstation without live external dependencies:
+  - Can be inspected programmatically from a script or operational CLI:
     ```python
     import asyncio
-    import httpx
     from python_shared.http import ResilientHttpClient
 
-    async def run_chaos():
-        client = ResilientHttpClient(base_url="http://mock-target", profile="api_service")
-        client._async_client = httpx.AsyncClient(
-            transport=httpx.MockTransport(lambda req: httpx.Response(503, json={"err": "downstream_down"})),
-            base_url="http://mock-target"
-        )
-        for i in range(5):
-            try:
-                await client.execute_async("GET", "/test", tenant_id="t-1")
-            except Exception:
-                pass
-        print("Circuit breaker tripped successfully in standalone test!")
+    async def check_pipeline():
+        client = ResilientHttpClient.from_config(".", base_url="https://api.internal.service")
+        print("Pipeline initialized with profile:", client.profile)
+        print("Circuit breaker initial state:", client.circuit_breaker.state)
 
-    asyncio.run(run_chaos())
+    asyncio.run(check_pipeline())
     ```
 
 ---
 
-### Step 8: Operational Hot-Reload, SIGHUP Triggers & Production Verification
+### Step 7: Operational Hot-Reload, SIGHUP Triggers & Production Verification
 
-#### 8.1 Purpose & Architectural Rationale
+#### 7.1 Purpose & Architectural Rationale
 In production environments, microservices must allow updating configuration parameters (such as increasing timeouts during database maintenance, adjusting circuit breaker thresholds, or modifying rate limits) with **zero dropped requests and zero downtime**:
 - Atomic Swap: Updating the configuration swaps an immutable memory pointer.
 - Active sockets remain connected; new requests immediately execute with the updated snapshot.
 
-#### 8.2 Operational Hot-Reload Verification Logic (Pseudocode)
+#### 7.2 Operational Hot-Reload Verification Logic (Pseudocode)
 Dynamic hot reload without process restart is verified as follows:
 
 ```text
@@ -1905,7 +1759,7 @@ algorithm VerifyDynamicHotReload:
     return STATUS_VERIFIED
 ```
 
-#### 8.3 Input/Output, Interconnection & Standalone Usage Reference
+#### 7.3 Input/Output, Interconnection & Standalone Usage Reference
 
 - **Inputs Given**:
 ```yaml
@@ -1932,7 +1786,7 @@ client:
   - Upstream: Modifies the file created in Step 2; refreshes the client instantiated in Step 4 and used by Step 5.
   - Downstream: Enables live operational tuning by SREs and production runbooks without triggering Kubernetes Pod restarts.
 - **How to Use Individually (Standalone Mode)**:
-  - Can be tested standalone to verify dynamic configuration reloading mechanics without starting the web server:
+  - Can be verified standalone to confirm dynamic configuration reloading mechanics without starting the web server:
     ```python
     from python_shared.http import ResilientHttpClient
 

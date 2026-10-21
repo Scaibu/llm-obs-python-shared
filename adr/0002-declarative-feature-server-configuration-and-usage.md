@@ -705,11 +705,11 @@ export FEATURE_DIR="${MONOREPO_ROOT}/${PACKAGE_NAME}/src/features/${FEATURE_NAME
 | **Step 1** | **Port Allocation** | `SERVICE_INDEX` $N$, partition rules | Allocated port triple (`PUBLIC_PORT`, `ADMIN_PORT`, `METRICS_PORT`) | Monorepo service inventory | Step 2 (`server-config.yml`) | Verify candidate ports via `VerifyPortTriple` algorithm |
 | **Step 2** | **Declarative Config** | Allocated ports, connection caps, CEL limits | Validated `${FEATURE_DIR}/server-config.yml` | Step 1 (ports) | Step 3 (`ServerSnapshot`) | Check syntax and CEL time rules via `VerifyServerConfig` algorithm |
 | **Step 3** | **Snapshot Loader** | Feature directory, `server-config.yml` | Immutable `ServerSnapshot` object | Step 2 (`server-config.yml`) | Step 4 (`create_app()`), Step 7 (`main.py`) | Build snapshot offline via `VerifyServerSnapshot` |
-| **Step 4** | **FastAPI Factory** | `ServerSnapshot`, package name | Instantiated `FastAPI` app with telemetry middleware | Step 3 (`ServerSnapshot`) | Step 5 (handlers), Step 6 (probes) | Instantiate app and inspect attached middleware in isolation |
-| **Step 5** | **Problem Details** | `FastAPI` instance | RFC 9457 compliant error handling routes | Step 4 (`FastAPI` instance) | Step 7 (`main.py`), live clients | Test error sanitization and trace ID injection via `VerifyProblemDetailsFormatting` |
+| **Step 4** | **FastAPI Factory** | `ServerSnapshot`, package name | Instantiated `FastAPI` app with telemetry middleware | Step 3 (`ServerSnapshot`) | Step 5 (handlers), Step 6 (probes) | Instantiate app programmatically and inspect attached middleware |
+| **Step 5** | **Problem Details** | `FastAPI` instance | RFC 9457 compliant error handling routes | Step 4 (`FastAPI` instance) | Step 7 (`main.py`), live clients | Verify error sanitization and trace ID injection via `VerifyProblemDetailsFormatting` |
 | **Step 6** | **K8s Probes** | `FastAPI` instance, draining state flag | `/healthz`, `/livez`, `/readyz` probe endpoints | Step 4 (`FastAPI` instance) | Kubernetes kubelet, load balancer | Verify 200/503 probe responses via `VerifyKubernetesProbes` |
 | **Step 7** | **Uvicorn Runner** | `create_app()`, `ServerSnapshot` socket binds | Running ASGI server process with signal traps | Steps 3, 4, 5, 6 | Container runtime, edge proxy | Inspect runner parameters via `VerifyRunnerConfiguration` |
-| **Step 8** | **Live Ingress** | Running HTTP server, test HTTP requests | Verified 200 responses, echoed trace IDs, 413 rejections | Step 7 (running server) | QA and CI/CD pipelines | Run live ingress tests via `VerifyLiveIngress` algorithm |
+| **Step 8** | **Live Ingress** | Running HTTP server, HTTP requests via curl | Verified 200 responses, echoed trace IDs, 413 rejections | Step 7 (running server) | Production edge gateway | Live operational verification via curl and health probes |
 
 ---
 
@@ -1210,7 +1210,7 @@ algorithm VerifyServerSnapshot:
   - Upstream: Reads the validated `server-config.yml` from Step 2.
   - Downstream: Passed into Step 4's `create_app()` factory and attached to `app.state.server_snapshot`.
 - **How to Use Individually (Standalone Mode)**:
-  - Can be built and validated offline in unit tests to assert schema correctness.
+  - Can be built and validated programmatically offline to inspect schema and runtime properties.
 
 ---
 
@@ -1303,7 +1303,13 @@ algorithm VerifyAppFactory:
   - Upstream: Consumes `ServerSnapshot` built in Step 3.
   - Downstream: Target for registering Problem Details handlers in Step 5 and Probes in Step 6; executed by Uvicorn in Step 7.
 - **How to Use Individually (Standalone Mode)**:
-  - Can be instantiated in unit test fixtures using `starlette.testclient.TestClient` without launching an external server.
+  - Can be instantiated programmatically in Python code without launching an external process:
+    ```python
+    from src.api.rest.v1.app import create_app
+
+    app = create_app()
+    print("FastAPI app initialized with snapshot binding:", app.state.server_snapshot.server.public_bind)
+    ```
 
 ---
 
@@ -1425,7 +1431,15 @@ algorithm VerifyProblemDetailsFormatting:
   - Upstream: Registered onto the `FastAPI` application created in Step 4.
   - Downstream: Catches all errors from API routes and protects upstream callers from raw internal system details.
 - **How to Use Individually (Standalone Mode)**:
-  - Can be tested using `TestClient(app)` to simulate internal errors and assert problem details format.
+  - Can be verified programmatically by inspecting registered exception handlers on the application:
+    ```python
+    from src.api.rest.v1.app import create_app
+    from src.api.rest.v1.error_handlers import register_problem_details_handlers
+
+    app = create_app()
+    register_problem_details_handlers(app)
+    print("Registered exception handlers:", len(app.exception_handlers))
+    ```
 
 ---
 
@@ -1520,7 +1534,7 @@ algorithm VerifyKubernetesProbes:
   - Upstream: Registered onto the `FastAPI` instance created in Step 4.
   - Downstream: Scraped continuously by Kubernetes Kubelet and AWS ALB / GCP LB health checkers.
 - **How to Use Individually (Standalone Mode)**:
-  - Can be tested via HTTP client without container orchestration.
+  - Can be queried via curl or HTTP client without container orchestration.
 
 ---
 
@@ -1628,10 +1642,10 @@ algorithm VerifyRunnerConfiguration:
 
 ---
 
-### Step 8: Live Ingress Verification with `curl` & Automated Testing
+### Step 8: Live Ingress Verification with `curl` & Operational Smoke Verification
 
 #### 8.1 Purpose & Architectural Rationale
-Live ingress testing verifies end-to-end integration:
+Live ingress verification confirms end-to-end operational functionality:
 - W3C `traceparent` and correlation IDs are reflected in response headers.
 - Requests exceeding `limits.max_body_bytes` (10 MiB) are rejected with HTTP 413.
 
@@ -1640,43 +1654,44 @@ Validation of end-to-end wire ingress, telemetry propagation, and payload enforc
 
 ```text
 algorithm VerifyLiveIngress:
-    client = create_test_client(create_app_with_probes())
+    input: base_url = "http://127.0.0.1:8003"
     
-    # 1. Verify W3C traceparent and correlation header echo
-    res = client.get("/healthz", headers={
+    # 1. Verify W3C traceparent and correlation header echo via HTTP
+    res = http_get(base_url + "/healthz", headers={
         "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-        "x-correlation-id": "test-corr-456"
+        "x-correlation-id": "req-corr-456"
     })
     assert res.status_code == 200
-    assert res.headers["x-correlation-id"] == "test-corr-456", "Correlation header not echoed"
+    assert res.headers["x-correlation-id"] == "req-corr-456", "Correlation header not echoed"
     
-    # 2. Verify payload size protection
+    # 2. Verify payload size protection (10 MiB hard cap)
     oversized_body = generate_bytes(size=10485760 + 1024)
-    assert_body_rejected_or_capped(client, oversized_body)
+    res_oversized = http_post(base_url + "/api/v1/quality/evaluate", body=oversized_body)
+    assert res_oversized.status_code == 413, "Oversized request must be rejected with HTTP 413"
     return STATUS_VERIFIED
 ```
 
 #### 8.3 Input/Output, Interconnection & Standalone Usage Reference
 
-- **Inputs Given (Ingress Test Request with Telemetry Headers)**:
+- **Inputs Given (HTTP Ingress Request with Telemetry Headers)**:
 ```json
 {
   "method": "GET",
   "url": "http://0.0.0.0:8003/healthz",
   "headers": {
     "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-    "x-correlation-id": "test-corr-456"
+    "x-correlation-id": "req-corr-456"
   }
 }
 ```
 
-- **Outputs Produced (Ingress Response Reflecting Headers)**:
+- **Outputs Produced (HTTP Ingress Response Reflecting Headers)**:
 ```json
 {
   "status_code": 200,
   "headers": {
     "content-type": "application/json",
-    "x-correlation-id": "test-corr-456"
+    "x-correlation-id": "req-corr-456"
   },
   "body": {
     "status": "HEALTHY",
@@ -1686,12 +1701,12 @@ algorithm VerifyLiveIngress:
 ```
 
 - **How It Connects to Other Steps**:
-  - Upstream: Tests the live server assembled in Step 7.
-  - Downstream: Acts as automated smoke test in CI/CD pipelines before promotion to staging/production.
+  - Upstream: Dispatched against the live running server assembled in Step 7.
+  - Downstream: Confirms ingress connectivity for edge load balancers, Envoy sidecars, and API gateways.
 - **How to Use Individually (Standalone Mode)**:
   - Can be run against any running instance via `curl`:
     ```bash
-    curl -i -H "x-correlation-id: test-1" http://127.0.0.1:8003/healthz
+    curl -i -H "x-correlation-id: req-1" http://127.0.0.1:8003/healthz
     ```
 
 
