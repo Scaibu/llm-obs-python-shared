@@ -33,30 +33,30 @@ We standardize on a declarative, per-feature configuration file named **`server-
 
 ---
 
-## 3. High Level Design (HLD)
+## 3. High Level Design (HLD) & Architectural Deep-Dive
 
-The diagram below illustrates the end-to-end server ingress architecture, from external edge proxies down to the FastAPI feature handler:
+### 3.1 Architecture Diagram
 
 ```mermaid
 flowchart TD
-    subgraph ExternalClients["Clients & Edge Gateway"]
+    subgraph ExternalClients["1. Clients & Edge Gateway"]
         Client[External Client] -->|HTTPS Request| LB[Edge Load Balancer / Envoy Proxy]
         LB -->|Internal Network / PROXY Protocol| Listener[Kernel Socket Listener (SO_REUSEPORT)]
     end
 
-    subgraph ServerCore["Server Transport Engine (Uvicorn / AsgiEngine)"]
+    subgraph ServerCore["2. Server Transport Engine (Uvicorn / AsgiEngine)"]
         Listener --> ConnMgr[Connection Manager]
         ConnMgr -->|Connection Caps & Keepalive| Codec[HTTP/1.1 & HTTP/2 Codec]
     end
 
-    subgraph ControlPlane["Control Plane & Configuration Engine"]
+    subgraph ControlPlane["3. Control Plane & Configuration Engine"]
         ConfigYAML["server-config.yml (Local Feature Config)"] -->|Parse & Validate| SnapshotMgr[ServerConfigurationService]
-        CELRules[CEL Cross-Field Validator] -->|Validate Invariants| SnapshotMgr
-        SnapshotMgr -->|Frozen Snapshot| PolicySnapshot[ServerPolicySnapshot]
-        AdminPort["Admin Port (127.0.0.1:9090)"] -.->|Trigger Reload| SnapshotMgr
+        CELRules[CEL Cross-Field Validator] -->|Validate Mathematical Invariants| SnapshotMgr
+        SnapshotMgr -->|Frozen Snapshot Pointer| PolicySnapshot[ServerPolicySnapshot]
+        AdminPort["Admin Port (127.0.0.1:9090)"] -.->|Trigger Atomic Reload| SnapshotMgr
     end
 
-    subgraph IngressPipeline["Request Policy Pipeline (python-shared/src/features/server)"]
+    subgraph IngressPipeline["4. Request Policy Pipeline (python-shared/src/features/server)"]
         Codec --> MW_Telemetry["01: CorrelationAndTelemetryMiddleware (W3C traceparent, x-request-id)"]
         MW_Telemetry --> MW_Peer["02: Peer Resolution (X-Forwarded-For trusted proxy check)"]
         MW_Peer --> MW_Admission["03: Global Admission & Priority Shedding"]
@@ -67,18 +67,55 @@ flowchart TD
         MW_Deadline --> MW_Idempotency["08: Idempotency Lock (idempotency-key)"]
     end
 
-    subgraph FeatureIngress["Feature Delivery Layer (src/api/rest/v1/)"]
+    subgraph FeatureIngress["5. Feature Delivery Layer (src/api/rest/v1/)"]
         MW_Idempotency --> Router[FastAPI Router]
         Router --> Handler[Ingress Delivery Handler]
         Handler --> Service[Domain Feature Service]
     end
 
-    subgraph MessagingPlane["Messaging & Observability Plane"]
+    subgraph MessagingPlane["6. Messaging & Observability Plane"]
         MW_Telemetry -.->|CloudEvents 1.0| KafkaAudit["Kafka: server.ingress.audit.v1"]
         MW_RateLimit -.->|Violations| KafkaSecurity["Kafka: server.security.violations.v1"]
         MW_Telemetry -.->|OTel Server Metrics| Collector[OpenTelemetry Collector]
     end
 ```
+
+---
+
+### 3.2 In-Depth HLD Component Walkthrough
+
+#### 1. Clients & Edge Gateway
+- **Proxy Boundary**: High-traffic public servers operate behind an L7 reverse proxy (Envoy, NGINX, or Cloud Load Balancer). The edge terminates public TLS 1.3, mitigates SYN/DDoS connection floods, and forwards clean traffic to the application listener.
+- **PROXY Protocol & Real Peer Identification**: The gateway injects the client's actual remote IP via `X-Forwarded-For` or PROXY protocol v2, allowing internal admission policies to distinguish legitimate users from bad actors.
+
+#### 2. Server Transport Engine (Uvicorn / Kernel Sockets)
+- **Linux Socket Tuning**:
+  - `SO_REUSEPORT`: Enables kernel-level load balancing across multiple worker processes on the same port, ensuring zero-downtime rolling process upgrades.
+  - `TCP_NODELAY`: Explicitly disables Nagle's algorithm, avoiding 40ms delayed-ACK packet buffering on small JSON request/response payloads.
+  - `socket_backlog`: Sized to 1024, preventing connection drops during sudden traffic spikes.
+- **Connection Manager**: Monitors total open connections against `limits.total_connection_cap` (10,000) and limits per-peer connections to `limits.per_client_cap` (100) to defeat single-IP socket exhaustion attacks.
+
+#### 3. Control Plane & Configuration Engine
+- **CEL Rule Engine**: Before a `server-config.yml` is accepted into memory, it runs through the Google Common Expression Language (CEL) validation engine. If cross-field rules fail (e.g. `header_read_timeout >= idle_connection_timeout`), the server refuses to boot, preventing invalid states from reaching runtime.
+- **Atomic Swap Invariant**: When hot-reloaded via `POST /admin/v1/server/reload`, the configuration pointer is swapped atomically (`atomic.Pointer`). Active connections finish under their original policy; new connections inherit the updated snapshot.
+
+#### 4. Request Policy Pipeline
+Requests pass through an explicit 8-stage sequence:
+1. **`CorrelationAndTelemetryMiddleware`**: Extracts incoming W3C `traceparent` or generates a new root trace ID. Injects `x-request-id` and `x-correlation-id` into request state and response headers.
+2. **`Peer Resolution`**: Inspects `X-Forwarded-For` strictly against `trusted_proxies` CIDRs. Untrusted hops are rejected to defeat IP spoofing.
+3. **`Global Admission`**: Enforces a global concurrency ceiling (`limits.global_admission_limit`). When saturated, background/batch requests are shed first (`priority_admission`).
+4. **`Pre-Auth Rate Limit`**: Applies GCRA / token bucket limits based on resolved peer IP *before* running expensive JWT cryptographic signature verifications.
+5. **`Authentication & Authorization`**: Validates JWT signatures against local JWKS caches, verifies scopes, and extracts tenant identity (`tenant_id`).
+6. **`Tenant Quota`**: Enforces per-tenant rate limits backed by Redis with local in-memory fallback.
+7. **`Deadline Viability`**: Inspects `grpc-timeout`. If the remaining execution budget minus `safety_margin_ms` (50ms) is lower than `min_budget_ms` (10ms), the server fails fast with HTTP 504 Deadline Exceeded.
+8. **`Idempotency Lock`**: Deduplicates mutations on POST/PUT requests using `idempotency-key` with a 24-hour TTL.
+
+#### 5. Feature Delivery Layer
+- The request reaches the feature handler in `src/api/rest/v1/`. The handler unmarshals the payload using strict Pydantic schemas and passes domain DTOs to the service.
+
+#### 6. Messaging & Observability Plane
+- Audit events, authorization failures, and payload-too-large violations are emitted as CloudEvents 1.0 JSON messages to Kafka.
+- Request duration histograms (`http.server.request.duration`) and active request gauges (`http.server.active_requests`) are exported to OpenTelemetry collectors.
 
 ---
 
@@ -130,9 +167,20 @@ sequenceDiagram
 
 ---
 
-### 4.2 Server Lifecycle State Machine
+### 4.2 Sequence Diagram In-Depth Step Walkthrough
 
-The server lifecycle follows this deterministic finite state machine to guarantee zero dropped requests during restarts and deployments:
+1. **Connection Admission (Steps 1–3)**: The client completes the TCP handshake. The socket listener hands the raw socket to the connection manager. The connection manager checks active sockets against `limits.total_connection_cap` (10,000) and `limits.per_client_cap` (100). If limits are exceeded, the socket is immediately closed with TCP RST to protect server memory.
+2. **Telemetry Ingress (Step 4)**: The client transmits the HTTP request headers. `CorrelationAndTelemetryMiddleware` inspects headers for `traceparent`. If missing, it generates a fresh W3C trace ID. It creates an OpenTelemetry server span, binds the trace context to Python's `contextvars`, and generates an `x-request-id`.
+3. **Admission Gate (Steps 5–6)**: The request enters admission control. If current in-flight concurrent requests exceed `limits.global_admission_limit` (1,000), the request is rejected with HTTP 503 Overloaded (formatted as an RFC 9457 Problem Details JSON envelope).
+4. **Authentication & Tenant Quota (Steps 7–8)**: The JWT is validated. If invalid or expired, HTTP 401 is returned. If valid, the tenant ID is resolved and checked against the token bucket in `tenant_quota`. If exhausted, HTTP 429 Too Many Requests is returned with a `Retry-After: 5` header.
+5. **Deadline Verification (Steps 9–10)**: The deadline checker inspects `grpc-timeout`. It subtracts `safety_margin_ms` (50ms) from the client's budget. If the remaining time is less than `min_budget_ms` (10ms), execution halts immediately with HTTP 504.
+6. **Execution & Egress (Steps 11–13)**: The request reaches the FastAPI handler. The domain service executes within the active span. The handler returns the response envelope. Telemetry middleware injects `x-correlation-id`, `x-request-id`, and records request latency into Prometheus/OTel histograms before returning HTTP 200 to the client.
+
+---
+
+### 4.3 Server Lifecycle State Machine
+
+The server lifecycle adheres to this deterministic state machine to eliminate 502/504 errors during deployments:
 
 ```mermaid
 stateDiagram-v2
@@ -174,41 +222,49 @@ stateDiagram-v2
     Stopped --> [*]: Exit Code 0
 ```
 
+#### Detailed Lifecycle Phase Walkthrough:
+1. **Phase 0 (Bootstrap)**: Installs signal handlers for `SIGTERM`, `SIGINT`, and `SIGHUP`. Initializes the structured bootstrap logger on stderr.
+2. **Phase 1 (Configuration & CEL)**: Loads `server-config.yml`, validates types, and runs CEL cross-field validation rules. Freezes configuration into an immutable `ServerPolicySnapshot`.
+3. **Phase 2 (Component Construction)**: Builds the dependency injection graph (database pools, Redis clients, repository adapters). No I/O or network connections are opened.
+4. **Starting & Socket Bind**: Binds TCP sockets to `public_bind` and `admin_bind`. Pre-warms database connection pools.
+5. **Running**: Opens the readiness probe (`/readyz` returns 200 OK). Traffic flows into the server.
+6. **Graceful Draining (On SIGTERM)**:
+   - **Step 6.1 (Mark Unready)**: Changes `/readyz` response to HTTP 503 Service Unavailable.
+   - **Step 6.2 (Propagation Delay)**: Sleeps for `lifecycle.propagation_wait` (default: 2s). This allows upstream load balancers and Kubernetes kube-proxy to detect the failed probe and remove the pod from the routing table.
+   - **Step 6.3 (Drain In-Flight)**: Awaits completion of all currently running requests up to `lifecycle.drain_deadline` (default: 15s).
+   - **Step 6.4 (Resource Cleanup)**: Closes database connection pools, flushes Kafka producers, and cleans up sockets within `lifecycle.force_cleanup_margin` (default: 3s).
+   - Total shutdown time (`2s + 15s + 3s = 20s`) is strictly less than Kubernetes `orchestrator_kill_timeout` (30s), ensuring SIGKILL is never triggered.
+
 ---
 
 ## 5. Control Panel & Configuration Engine
 
-The server configuration subsystem incorporates an administrative control plane running on a dedicated local loopback interface (`admin_bind: 127.0.0.1:9090` / `900X`):
-
 ### 5.1 Common Expression Language (CEL) Validation Engine
-Before any configuration is accepted into runtime, it is validated against mathematical invariants:
-1. `header_read_timeout < idle_connection_timeout` (Prevents Slowloris header hanging).
-2. `public_bind != admin_bind` (Prevents port collisions between public ingress and management controls).
-3. `idle_connection_timeout > upstream_lb_idle_timeout` (Prevents race conditions where backend closes socket before LB).
-4. `propagation_wait + drain_deadline < orchestrator_kill_timeout` (Ensures graceful shutdown finishes before Kubernetes issues SIGKILL).
-5. `max_body_bytes <= 52428800` (Enforces hard 50 MiB upper safety bound).
+The server enforces mathematical and operational invariants at startup:
+- `header_read_timeout < idle_connection_timeout`: Guarantees Slowloris headers are terminated before socket keepalive expires.
+- `public_bind != admin_bind`: Prevents port collisions between public ingress and internal control interfaces.
+- `idle_connection_timeout > upstream_lb_idle_timeout`: Ensures edge proxies close idle connections first, preventing 502 race conditions.
+- `propagation_wait + drain_deadline + force_cleanup_margin < orchestrator_kill_timeout`: Guarantees graceful shutdown finishes before the orchestrator forcibly terminates the container.
 
 ### 5.2 Control Panel Admin API
-Microservices expose the following administrative management endpoints:
+Running on `admin_bind` (`127.0.0.1:9090` / `900X`):
 
-| Endpoint | Method | Purpose |
-|---|---|---|
-| `GET /admin/v1/server/config` | `GET` | Returns active `ServerPolicySnapshot` in JSON format. |
-| `POST /admin/v1/server/reload` | `POST` | Forces immediate disk reread, CEL validation, and atomic pointer swap of `server-config.yml`. |
-| `GET /admin/v1/server/connections` | `GET` | Returns live active TCP sockets, admitted connections, and peer count breakdown. |
-| `GET /admin/v1/server/health/ready` | `GET` | Readiness probe endpoint (`/readyz`) used by Kubernetes and load balancers. |
-| `GET /admin/v1/server/health/live` | `GET` | Liveness probe endpoint (`/livez`) checking process deadlocks. |
+| Endpoint | Method | Response | Description |
+|---|---|---|---|
+| `/admin/v1/server/config` | `GET` | `200 OK` (JSON) | Dumps active `ServerPolicySnapshot`. |
+| `/admin/v1/server/reload` | `POST` | `200 OK` / `400 Bad Request` | Reloads `server-config.yml` from disk and executes CEL validation. |
+| `/admin/v1/server/connections` | `GET` | `200 OK` (JSON) | Live socket count, admitted connections, and peer metrics. |
+| `/readyz` | `GET` | `200 OK` / `503 Unavailable` | Readiness probe for load balancers. Returns 503 during shutdown drain. |
+| `/livez` | `GET` | `200 OK` (JSON) | Liveness probe verifying process event loop health. |
 
 ---
 
 ## 6. Messaging Panel & Event Topology
 
-All cross-cutting security violations, quota exhaustion events, and lifecycle audits are streamed to Kafka as CloudEvents 1.0 JSON payloads.
-
 ### 6.1 Kafka Topic Architecture
-- **`server.ingress.audit.v1`**: Audit records for sampled incoming requests carrying trace ID, duration, peer IP, and response status.
-- **`server.security.violations.v1`**: Dispatched on authentication failure, CSRF/CORS rejection, or payload tampering.
-- **`server.lifecycle.events.v1`**: Dispatched on server state transitions (`STARTING`, `RUNNING`, `DRAINING`, `STOPPED`).
+- **`server.ingress.audit.v1`**: Sampled request access log carrying trace ID, route template, HTTP status, and duration.
+- **`server.security.violations.v1`**: Security alerts emitted when payloads exceed `limits.max_body_bytes` or JWT verification fails.
+- **`server.lifecycle.events.v1`**: Server state transitions (`STARTING`, `RUNNING`, `DRAINING`, `STOPPED`).
 
 ### 6.2 CloudEvent Schema Example (`server.security.violations.v1`)
 ```json
@@ -234,114 +290,35 @@ All cross-cutting security violations, quota exhaustion events, and lifecycle au
 
 ---
 
-## 7. Exhaustive Configuration Parameter Catalog
+## 7. Exhaustive Parameter Reference: Valid vs. Ideal vs. Anti-Patterns
 
-Below is the complete reference of every single parameter configurable in `server-config.yml`:
+This section provides an in-depth parameter analysis: syntax rules, ideal production settings, and dangerous anti-patterns that risk production outages.
 
-```yaml
-schema_version: "1.0.0"
-feature_name: "quality_baseline"
+### 7.1 Parameter Analysis Table
 
-# ==============================================================================
-# SECTION 1: NETWORK LISTENER & SOCKET CONTROLS
-# ==============================================================================
-server:
-  public_bind: "0.0.0.0:8003"           # Ingress socket bind address (interface:port)
-  admin_bind: "127.0.0.1:9003"           # Management & metrics probe bind address
-  metrics_bind: "127.0.0.1:9103"         # Dedicated Prometheus scrape listener (optional)
-  max_request_timeout: "60s"            # Maximum duration allowed for complete request processing
-  idle_connection_timeout: "65s"        # TCP keepalive idle connection deadline
-  header_read_timeout: "10s"            # Maximum time allowed to receive full HTTP headers
-  handshake_timeout: "5s"               # TLS negotiation timeout budget
-  upstream_lb_idle_timeout: "60s"       # Expected idle timeout of upstream edge proxy (Envoy/ALB)
-  tcp_nodelay: true                     # Disable Nagle's algorithm for low-latency request/response
-  so_reuseport: false                   # Enable kernel-level multi-process port sharing
-  socket_backlog: 1024                  # OS listen backlog queue capacity (net.core.somaxconn)
-  tls_mode: "off"                       # Options: off | strict | permissive | mtls
-  min_tls_version: "TLS1.3"             # Options: TLS1.2 | TLS1.3
-  trusted_proxies:                      # CIDR blocks permitted to populate X-Forwarded-For
-    - "127.0.0.1/32"
-    - "10.0.0.0/8"
-    - "172.16.0.0/12"
-    - "192.168.0.0/16"
-  max_forwarded_hops: 3                 # Maximum trusted reverse-proxy hops
-
-# ==============================================================================
-# SECTION 2: LIFECYCLE CONTROLLER & DRAIN ORCHESTRATION
-# ==============================================================================
-lifecycle:
-  propagation_wait: "2s"                # Sleep after SIGTERM before closing listener (lets LB deregister)
-  drain_deadline: "15s"                 # Maximum time to await completion of in-flight active requests
-  force_cleanup_margin: "3s"            # Buffer to close persistent DB/Redis pools before SIGKILL
-  orchestrator_kill_timeout: "30s"      # Kubernetes terminationGracePeriodSeconds ceiling
-  health_check_path: "/healthz"         # General server health status endpoint
-  readiness_probe_path: "/readyz"       # Traffic admission probe endpoint
-  liveness_probe_path: "/livez"         # Process deadlock probe endpoint
-
-# ==============================================================================
-# SECTION 3: LIMITS & CAPACITIES
-# ==============================================================================
-limits:
-  total_connection_cap: 10000           # Global maximum concurrent TCP connections admitted
-  per_client_cap: 100                   # Maximum concurrent connections permitted per peer IP
-  handshake_rate_limit_per_sec: 200     # Maximum TLS handshakes per second per peer IP
-  max_body_bytes: 10485760              # Maximum request body size in bytes (10 MiB)
-  max_decompressed_bytes: 41943040      # Maximum decompressed body size (40 MiB)
-  max_header_bytes: 32768               # Maximum size of complete HTTP headers (32 KiB)
-  max_headers_count: 100                # Maximum number of header fields accepted
-  global_admission_limit: 1000          # Maximum concurrent requests admitted to pipeline queue
-  queue_size: 200                       # Queue depth before request rejection
-  queue_max_wait: "100ms"               # Maximum wait time in admission queue
-
-# ==============================================================================
-# SECTION 4: RATE LIMITS & TENANT QUOTAS
-# ==============================================================================
-pre_auth_rate_limit:
-  algorithm: "gcra"                     # Generic Cell Rate Algorithm
-  rate: "100/s"                         # Permitted requests per second per IP
-  burst: 200                            # Maximum burst token capacity
-  refill_rate_per_sec: 100.0            # Refill tokens per second
-  retry_after_seconds: 5                # Retry-After header duration on HTTP 429
-
-tenant_quota:
-  key: "claim.tenant_id"                # JWT claim used to identify tenant
-  algorithm: "token_bucket"
-  rate: "50/s"                          # Permitted requests per second per tenant
-  burst: 500                            # Tenant burst capacity
-  refill_rate_per_sec: 50.0             # Refill tokens per second
-  store_timeout_ms: 20                  # Redis quota check timeout
-  fallback_mode: "local_fallback"       # Behavior if Redis is unreachable
-
-# ==============================================================================
-# SECTION 5: DEADLINE & IDEMPOTENCY
-# ==============================================================================
-deadline:
-  inbound_header: "grpc-timeout"        # Header indicating upstream client deadline
-  safety_margin_ms: 50.0                # Internal processing safety buffer
-  min_budget_ms: 10.0                   # Minimum viable execution budget
-  max_budget_ms: 10000.0                # Maximum allowed request deadline
-  enforce_min_viable: true              # Reject immediately with 504 if budget < min_budget
-
-idempotency:
-  header: "idempotency-key"             # Required header for POST/PUT retry safety
-  key_format: "^[A-Za-z0-9-]{16,128}$"  # Regex format validation
-  ttl_seconds: 86400                    # 24 hours deduplication retention
-  on_concurrent_duplicate: "conflict"   # Options: conflict (409) | await_result
-
-# ==============================================================================
-# SECTION 6: MIDDLEWARE & OBSERVABILITY
-# ==============================================================================
-middleware:
-  correlation_telemetry:
-    enabled: true                       # Mount CorrelationAndTelemetryMiddleware
-    header_name: "x-correlation-id"     # Primary correlation header key
-    propagate_w3c: true                 # Propagate W3C Trace Context (traceparent)
-    record_latency: true                # Measure and log total request duration
-    inject_request_id: true             # Generate x-request-id if omitted
-  problem_details:
-    enabled: true                       # Format all errors according to RFC 9457
-    type_base_uri: "https://errors.internal/problems/"
-```
+| Parameter Path | Type & Valid Range | Ideal Production Setting | Anti-Pattern (What is NOT Ideal) | Failure Mode Caused by Anti-Pattern |
+|---|---|---|---|---|
+| `server.public_bind` | `string`: `"IP:PORT"` (`1024-65535`) | `"0.0.0.0:8000"` (or assigned port: `8001`, `8003`, etc.). | Binding to `"127.0.0.1:8000"` inside container, or using ports `< 1024`. | Binding to localhost inside Docker/K8s makes server unreachable from outside container; ports <1024 require root privileges. |
+| `server.admin_bind` | `string`: `"IP:PORT"` | `"127.0.0.1:9090"` (or feature-isolated loopback port). | Setting equal to `public_bind` or binding admin to `0.0.0.0`. | Port collision with public traffic; exposing administrative reload and debug endpoints to public internet. |
+| `server.idle_connection_timeout` | `string`: `"5s"` to `"300s"` | `"65s"` (must exceed upstream LB idle timeout). | Setting to `"30s"` while upstream LB timeout is `"60s"`. | Race condition: Backend closes idle socket just as LB forwards a request, triggering HTTP 502 Bad Gateway at edge. |
+| `server.header_read_timeout` | `string`: `"1s"` to `"60s"` | `"10s"` (must be `< idle_connection_timeout`). | Setting to `"120s"` or equal to `idle_connection_timeout`. | Slowloris vulnerability: Malicious clients send 1 byte every 10 seconds, holding thousands of connections open indefinitely. |
+| `server.handshake_timeout` | `string`: `"1s"` to `"30s"` | `"5s"`. | Setting to `> 20s`. | TLS negotiation flood attacks exhaust worker CPU cycles on unauthenticated connections. |
+| `server.upstream_lb_idle_timeout` | `string`: `"5s"` to `"300s"` | `"60s"` (matching AWS ALB / Envoy default). | Setting higher than `idle_connection_timeout`. | Violates CEL rule; triggers connection resets under moderate load. |
+| `server.tcp_nodelay` | `bool`: `true`, `false` | `true`. | Setting to `false`. | Nagle's algorithm buffers packets, introducing artificial 40ms latency delays on small JSON API responses. |
+| `server.so_reuseport` | `bool`: `true`, `false` | `false` for single-process containers; `true` for multi-worker bare metal. | Enabling `true` when process uses non-thread-safe local caches. | Kernel randomly distributes requests across processes without cache affinity. |
+| `server.socket_backlog` | `int`: `64` to `65535` | `1024` (or matching OS `net.core.somaxconn`). | Setting to `< 128`. | Under sudden burst traffic, the kernel drops incoming TCP SYN packets, causing connection timeouts. |
+| `server.trusted_proxies` | `list[str]` (CIDRs) | VPC subnet CIDRs (e.g. `10.0.0.0/8`, `127.0.0.1/32`). | Adding `"0.0.0.0/0"` to trusted proxies. | Catastrophic security breach: Any client can forge `X-Forwarded-For` and bypass IP-based rate limiting and access controls. |
+| `lifecycle.propagation_wait` | `string`: `"1s"` to `"10s"` | `"2s"` to `"3s"`. | Setting to `"0s"`. | Ingress 502 drops: Server stops accepting traffic before Kubernetes endpoint controller removes pod IP from ingress proxy. |
+| `lifecycle.drain_deadline` | `string`: `"5s"` to `"60s"` | `"15s"`. | Setting to `"1s"` or `> 60s`. | In-flight database mutations or client requests are severed midway; exceeding Kubernetes shutdown ceiling triggers SIGKILL. |
+| `lifecycle.orchestrator_kill_timeout` | `string`: `"10s"` to `"120s"` | `"30s"` (matching K8s `terminationGracePeriodSeconds`). | Setting lower than `propagation_wait + drain_deadline`. | Process is forcibly killed with `SIGKILL` before connection drain finishes. |
+| `limits.total_connection_cap` | `int`: `10` to `50000` | `10000` per container. | Setting to unbounded (`0` or negative). | Memory exhaustion: Process accepts 50,000 connections until killed by Linux Out-Of-Memory (OOM) killer. |
+| `limits.per_client_cap` | `int`: `1` to `1000` | `100` per remote IP. | Setting to `10000`. | A single malfunctioning client or attacker can consume 100% of server connection capacity. |
+| `limits.max_body_bytes` | `int`: `1024` to `52428800` | `10485760` (10 MiB) for standard APIs; `52428800` (50 MiB) for file uploads. | Setting to unbounded (`> 500 MiB`). | Heap memory exhaustion: Uploading a single 1 GB file crashes the Python runtime. |
+| `limits.global_admission_limit` | `int`: `10` to `10000` | `1000` concurrent requests. | Leaving unconfigured or setting to `50000`. | Event loop saturation: Async event loop queues millions of micro-tasks, driving response latency from 10ms to 20 seconds. |
+| `pre_auth_rate_limit.rate` | `string`: `"1/s"` to `"10000/s"` | `"100/s"` per IP. | Setting to `"1/s"` (too aggressive) or disabling. | Legitimate office NAT gateways with 100 users get blocked; disabling leaves JWT verification open to CPU denial-of-service. |
+| `tenant_quota.burst` | `int`: `>= rate` | `2x` to `5x` of rate (e.g. `500` for 50/s rate). | Setting equal to rate (no burst capacity). | Legitimate batch client workflows fail with HTTP 429 on micro-bursts. |
+| `deadline.safety_margin_ms` | `float`: `5.0` to `500.0` | `50.0` ms. | Setting to `0.0`. | Server continues processing requests after the upstream client has already timed out and disconnected. |
+| `middleware.correlation_telemetry.enabled` | `bool`: `true`, `false` | `true` (mandatory across all services). | Setting to `false`. | Distributed tracing is severed; gateway logs cannot be correlated with database queries or service exceptions. |
 
 ---
 
@@ -470,7 +447,7 @@ Inside `src/main.py`:
 ```python
 import uvicorn
 from pathlib import Path
-from src.api.rest.v1.app import create_app
+from src.api.rest/v1/app import create_app
 from src.features.server.server_configuration.service.server_config_service import ServerConfigurationService
 
 def main():

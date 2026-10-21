@@ -35,38 +35,38 @@ We standardize on a declarative, per-feature configuration file named **`http-co
 
 ---
 
-## 3. High Level Design (HLD)
+## 3. High Level Design (HLD) & Architectural Deep-Dive
 
-The diagram below illustrates the end-to-end outbound HTTP request lifecycle, showing how client invocations are governed by the composable pipeline, profile resolution, and transport execution layers:
+### 3.1 Architecture Diagram
 
 ```mermaid
 flowchart TD
-    subgraph FeatureDomain["Domain Feature Layer (src/features/{feature}/)"]
-        Service[Domain Service] -->|Domain Request| Port[Hexagonal Outbound Port]
-        Port -->|Invokes| Adapter[Outbound HTTP Adapter]
-        Adapter -->|Loads| ConfigFile["http-config.yml (Local Feature Config)"]
+    subgraph FeatureDomain["1. Domain Feature Layer (src/features/{feature}/)"]
+        Service[Domain Service] -->|Pure Domain Intent| Port[Hexagonal Outbound Port]
+        Port -->|Invokes Interface| Adapter[Outbound HTTP Adapter]
+        Adapter -->|Loads On Boot| ConfigFile["http-config.yml (Local Feature Config)"]
     end
 
-    subgraph ControlPlane["Control Plane & Configuration Engine"]
-        ConfigFile -->|Parse & Validate| SnapshotMgr[Config Snapshot Manager]
-        AdminSignal[Admin Signals / Hot-Reload] -->|Atomic Swap| SnapshotMgr
-        SnapshotMgr -->|Resolved Snapshot| ClientFactory[Client Factory]
+    subgraph ControlPlane["2. Control Plane & Configuration Engine"]
+        ConfigFile -->|YAML Parse & Validate| SnapshotMgr[Config Snapshot Manager]
+        AdminSignal["Admin Signals (SIGHUP / HTTP Reload)"] -->|Trigger Atomic Swap| SnapshotMgr
+        SnapshotMgr -->|Immutable Pointer| ClientFactory[Client Factory / Pool]
     end
 
-    subgraph PipelineEngine["Composable HTTP Pipeline Engine (python-shared)"]
+    subgraph PipelineEngine["3. Composable HTTP Pipeline Engine (python-shared)"]
         Adapter -->|execute_async()| ClientFactory
         ClientFactory --> ClientInstance[ResilientHttpClient]
         ClientInstance --> PipelineRunner[HttpPipelineRunner]
         
-        subgraph PipelineSteps["Composable Execution Steps"]
+        subgraph PipelineSteps["Ordered Pipeline Steps (Strict Mathematical Order)"]
             direction TB
-            Step1["01: StepInputHardening (CRLF, JSON depth, path escape)"]
-            Step2["02: StepSsrfValidation (DNS check, RFC 1918 IP block)"]
-            Step3["03: StepContextIsolation (W3C traceparent, tenant injection)"]
-            Step4["04: StepCacheEval (RFC 9111 TTL, stale-if-error)"]
-            Step5["05: StepSingleflight (In-flight request deduplication)"]
+            Step1["01: StepInputHardening (CRLF header sanitization, JSON depth)"]
+            Step2["02: StepSsrfValidation (DNS resolve, block 169.254/RFC1918)"]
+            Step3["03: StepContextIsolation (Inject W3C traceparent, x-tenant-id)"]
+            Step4["04: StepCacheEval (RFC 9111 HTTP Cache & stale-if-error)"]
+            Step5["05: StepSingleflight (In-flight identical request deduplication)"]
             Step6["06: StepCircuitBreaker (Sliding window failure tracking)"]
-            Step7["07: StepRateLimit (Token bucket / Leaky bucket rate limiter)"]
+            Step7["07: StepRateLimit (Token bucket / Leaky bucket limiter)"]
             Step8["08: StepAdmissionControl (Concurrency bulkhead & queue)"]
             
             Step1 --> Step2 --> Step3 --> Step4 --> Step5 --> Step6 --> Step7 --> Step8
@@ -75,17 +75,48 @@ flowchart TD
         PipelineRunner --> PipelineSteps
     end
 
-    subgraph TransportLayer["Transport & Network Layer"]
-        PipelineSteps -->|Admitted & Hardened| Transport[HTTPX Connection Pool Engine]
-        Transport -->|HTTP/1.1 or HTTP/2| Wire[Outbound Network Wire]
+    subgraph TransportLayer["4. Transport & Connection Pool Engine"]
+        PipelineSteps -->|Admitted, Sanitized & Traced| Transport[HTTPX Transport Pool]
+        Transport -->|HTTP/1.1 or HTTP/2 Multiplex| Wire[Physical Network Socket / Wire]
     end
 
-    subgraph MessagingPlane["Messaging & Observability Plane"]
-        PipelineSteps -.->|CloudEvents 1.0| KafkaAudit["Kafka: http.outbound.audit.v1"]
-        PipelineSteps -.->|Unrecoverable Failures| KafkaDLQ["Kafka: http.outbound.dlq.v1"]
-        Transport -.->|OTel Metrics & Spans| Collector[OpenTelemetry Collector]
+    subgraph MessagingPlane["5. Messaging & Observability Plane"]
+        PipelineSteps -.->|CloudEvents 1.0 Audits| KafkaAudit["Kafka Topic: http.outbound.audit.v1"]
+        PipelineSteps -.->|Retry Exhaustion / Outage| KafkaDLQ["Kafka Topic: http.outbound.dlq.v1"]
+        Transport -.->|OTel Spans & Metrics| Collector[OpenTelemetry Collector]
     end
 ```
+
+---
+
+### 3.2 In-Depth HLD Component Walkthrough
+
+#### 1. Domain Feature Layer (`src/features/{feature}/`)
+- **Isolation Invariant**: Domain services (`service/{f}.service.py`) must contain zero external network references. They interact exclusively with abstract port interfaces (`infrastructure/ports/{f}.port.py`).
+- **Adapter Encapsulation**: Outbound adapters (`infrastructure/adapters/{f}.adapter.py`) encapsulate `ResilientHttpClient`. The adapter resolves its local directory to locate `http-config.yml`, ensuring configuration is strictly co-located with the feature using it.
+
+#### 2. Control Plane & Configuration Engine
+- **Decoupled Lifecycle**: The configuration engine decouples file parsing from request handling. The YAML is parsed into strongly-typed Pydantic schemas, validated against range constraints, and compiled into an immutable snapshot.
+- **Zero-Downtime Hot-Reload**: Live reload operates via an atomic pointer swap (`atomic.Pointer`). In-flight requests retain their original configuration reference, while new requests immediately pick up the updated snapshot. No sockets are closed prematurely.
+
+#### 3. Composable HTTP Pipeline Engine
+The 8 pipeline steps execute in a strict, mathematically sound sequence:
+1. **`StepInputHardening` (Security Gate 1)**: Runs first to neutralize malicious input before any network activity. Prevents CRLF injection in HTTP headers (which causes HTTP response splitting) and validates JSON depth to stop recursion denial-of-service.
+2. **`StepSsrfValidation` (Security Gate 2)**: Resolves destination domain names and verifies the resolved IP against blocked CIDRs. By executing *before* context injection or caching, it stops SSRF attacks without wasting system resources.
+3. **`StepContextIsolation` (Context Enrichment)**: Injects W3C `traceparent`, `x-request-id`, `x-correlation-id`, and tenant metadata into outbound headers. Placed *before* caching so cache keys incorporate tenant identity to prevent cross-tenant data leakage.
+4. **`StepCacheEval` (Fast-Path Optimization)**: Checks in-memory or Redis caches for matching responses. On a cache hit, the request short-circuits immediately, bypassing downstream circuit breakers, rate limiters, and network I/O.
+5. **`StepSingleflight` (Stampede Protection)**: Deduplicates concurrent identical requests. Only one request (the "leader") continues through the remaining pipeline; all other concurrent calls ("followers") pause and await the leader's response.
+6. **`StepCircuitBreaker` (Downstream Fault Isolation)**: Tracks consecutive failures and slow calls across a sliding window. Positioned *after* singleflight so that 100 concurrent duplicate requests only count as 1 request against the failure rate threshold.
+7. **`StepRateLimit` (Traffic Shaping)**: Enforces token-bucket rate limits per tenant or per upstream host. Rejects excessive bursts before they reach the connection pool.
+8. **`StepAdmissionControl` (Resource Bulkhead)**: Enforces concurrency caps and queues pending requests. Acts as the final gate protecting local process memory and thread pools.
+
+#### 4. Transport & Connection Pool Engine
+- Uses persistent connection pools via HTTPX. Sockets are kept alive (`max_keepalive_connections`), enabling TCP handshake and TLS session reuse.
+- Supports HTTP/2 multiplexing, allowing dozens of concurrent requests over a single TCP connection.
+
+#### 5. Messaging & Observability Plane
+- Asynchronous telemetry: Circuit breaker state changes, rate-limit drops, and SSRF security violations emit CloudEvents 1.0 payloads to Kafka topics.
+- Spans and metric histograms are recorded using OpenTelemetry HTTP client semantic conventions (`http.client.request.duration`).
 
 ---
 
@@ -111,32 +142,32 @@ sequenceDiagram
     
     %% Security Phase
     Runner->>Sec: execute(context)
-    Note over Sec: Validate CRLF, check DNS, verify non-RFC1918
+    Note over Sec: Validate CRLF in headers<br/>Resolve DNS & verify IP not in RFC 1918 / 169.254
     Sec-->>Runner: Ok (Sanitized Target)
 
     %% Context Propagation
     Runner->>Ctx: execute(context)
-    Note over Ctx: Inject W3C traceparent, x-tenant-id, x-correlation-id
+    Note over Ctx: Inject W3C traceparent<br/>Inject x-tenant-id, x-correlation-id
     Ctx-->>Runner: Ok (Headers Enriched)
 
     %% Cache Evaluation
     Runner->>Cache: execute(context)
     alt Cache Hit
-        Cache-->>Client: Cached Response (Short-circuit)
-        Client-->>App: Return Cached Result
+        Cache-->>Client: Return Cached Response (Short-circuit)
+        Client-->>App: httpx.Response (Cached)
     else Cache Miss / Singleflight Leader
         Cache-->>Runner: Proceed (Leader Registered)
     end
 
     %% Resilience Checks
     Runner->>Res: execute(context)
-    Note over Res: Check CircuitBreaker (CLOSED), acquire RateLimit token, acquire Bulkhead slot
-    Res-->>Runner: Admitted
+    Note over Res: Check CircuitBreaker (CLOSED)<br/>Acquire RateLimit Token<br/>Acquire Bulkhead Slot
+    Res-->>Runner: Admitted (Resource Reserved)
 
     %% Network Execution
     Runner->>Transport: send(request)
-    Transport->>Target: Outbound Wire Request
-    Target-->>Transport: Wire Response (HTTP 200)
+    Transport->>Target: Outbound Wire Request (HTTP/2 or Keepalive Socket)
+    Target-->>Transport: Wire Response (HTTP 200 OK)
     Transport-->>Runner: Response Received
 
     %% Release & Cache Store
@@ -148,9 +179,30 @@ sequenceDiagram
 
 ---
 
-### 4.2 Circuit Breaker Deterministic State Machine
+### 4.2 Sequence Diagram In-Depth Step Walkthrough
 
-The circuit breaker adheres strictly to this finite state machine:
+1. **Invocation (Steps 1–2)**: The outbound adapter invokes `client.execute_async()`. The client wraps the target, headers, payload, and tenant ID into a mutable `PipelineContext` and forwards it to `HttpPipelineRunner`.
+2. **Security & SSRF Inspection (Steps 3–4)**:
+   - `StepInputHardening` scans headers for carriage returns (`\r\n`) and validates JSON nesting depth against `security.input_hardening.max_json_depth`.
+   - `StepSsrfValidation` performs synchronous DNS resolution on the hostname. If the resolved IP falls within blocked CIDR ranges (e.g. `10.0.0.0/8`, `169.254.169.254`), execution immediately aborts with `SSRFSecurityViolation`.
+3. **Context Enrichment (Steps 5–6)**: `StepContextIsolation` extracts the active OpenTelemetry span context, formats the W3C `traceparent` header, and attaches `x-tenant-id` and `x-request-id`.
+4. **Cache & Singleflight Fast-Path (Steps 7–9)**:
+   - `StepCacheEval` checks the local cache. If a valid, non-expired response exists, it immediately returns the cached response, bypassing all network layers.
+   - If not cached, `StepSingleflight` generates a SHA-256 key from `Method + URL + Tenant + Body`. If an identical request is already in-flight, subsequent requests pause and wait for the leader's response.
+5. **Resilience & Admission (Steps 10–11)**:
+   - `StepCircuitBreaker` verifies that the circuit is `CLOSED` or `HALF-OPEN`. If `OPEN`, it rejects the request instantly with `CircuitBreakerOpenException`.
+   - `StepRateLimit` verifies token availability. If the bucket is exhausted, it throws HTTP 429.
+   - `StepAdmissionControl` verifies available slots in the concurrency bulkhead. If full, it queues the request up to `queue_timeout_seconds`.
+6. **Network Wire I/O (Steps 12–14)**: The request is dispatched over an established keep-alive TCP socket or HTTP/2 multiplexed stream.
+7. **Post-Processing & Release (Steps 15–17)**:
+   - The bulkhead slot is released back to the pool.
+   - The circuit breaker records the outcome (success or error).
+   - If eligible, the response is stored in cache, and waiting singleflight followers are woken up.
+   - The final `httpx.Response` is returned to the adapter.
+
+---
+
+### 4.3 Circuit Breaker Deterministic State Machine
 
 ```mermaid
 stateDiagram-v2
@@ -181,28 +233,43 @@ stateDiagram-v2
     HalfOpen --> Closed: All Probes Succeeded
 ```
 
+#### Detailed State Transition Invariants:
+1. **`CLOSED` (Normal Operation)**:
+   - All requests pass through freely.
+   - Failures (5xx status codes, connection drops, read timeouts) are recorded in a sliding window.
+   - **Transition to `OPEN`**: Triggers if consecutive failures exceed `failure_threshold` (default: 5) OR if the failure rate exceeds `failure_rate_threshold` (default: 50%) after at least `minimum_number_of_calls` (default: 10) have been evaluated.
+2. **`OPEN` (Short-Circuit Defense)**:
+   - All outbound requests fail fast immediately with `CircuitBreakerOpenException` (zero network I/O, zero thread allocation).
+   - The circuit remains in `OPEN` for `recovery_timeout_seconds` (default: 30.0s).
+   - **Transition to `HALF-OPEN`**: Triggers automatically once `recovery_timeout_seconds` elapses.
+3. **`HALF-OPEN` (Canary Probing)**:
+   - Permits a strictly limited number of trial probe requests (`half_open_requests`, default: 3).
+   - All other requests continue to fail fast.
+   - **Transition to `CLOSED`**: Triggers if all `half_open_successes_to_close` trial probes succeed.
+   - **Transition to `OPEN`**: Triggers immediately if even a single trial probe fails.
+
 ---
 
 ## 5. Control Panel & Configuration Engine
 
-The HTTP subsystem incorporates a dedicated runtime Control Panel:
-
 ### 5.1 Dynamic Hot-Reload Architecture
-1. **File Watcher & Signal Trap**: The process monitors `http-config.yml` via inotify or SIGHUP.
-2. **Atomic Swap Invariant**: When changes are detected, a new `ServerPolicySnapshot` / `HttpConfigSnapshot` is compiled and validated against CEL schemas.
-3. **Zero Request Dropping**: Existing in-flight requests hold references to the snapshot they began execution with. New requests acquire the newly swapped pointer atomically (`atomic.Pointer` pattern).
-4. **Validation Failure Safety**: If the new YAML fails schema validation, the update is rejected, the old configuration continues serving, and an alert event is dispatched to Kafka.
+1. **Signal Trap & File Watcher**: The host process traps `SIGHUP` and monitors `http-config.yml` via filesystem notification hooks.
+2. **Two-Phase Validation**:
+   - Phase 1 (Parsing): The file is read and parsed as YAML.
+   - Phase 2 (Validation): The schema is validated against range boundaries and profile constraints.
+3. **Atomic Pointer Swap**: If validation passes, the active snapshot reference is swapped atomically. In-flight requests continue executing against their existing snapshot; all subsequent requests read the new snapshot.
+4. **Fallback on Failure**: If a newly edited YAML contains a syntax or validation error, the engine logs the failure, leaves the current running snapshot intact, and dispatches an alert to Kafka.
 
 ### 5.2 Control Panel Admin API
-Each microservice exposes control endpoints on its admin port (`127.0.0.1:9090` / `900X`):
+Each service exposes control endpoints on its admin port (`127.0.0.1:9090` / `900X`):
 
-| Endpoint | Method | Purpose |
-|---|---|---|
-| `GET /admin/v1/http/config` | `GET` | Returns active configuration snapshot and active execution profile. |
-| `POST /admin/v1/http/reload` | `POST` | Forces immediate disk reread and atomic swap of `http-config.yml`. |
-| `GET /admin/v1/http/circuit-breaker` | `GET` | Inspects state (CLOSED, OPEN, HALF_OPEN), failure counts, and probe metrics. |
-| `POST /admin/v1/http/circuit-breaker/reset` | `POST` | Manually forces an OPEN circuit breaker back to CLOSED. |
-| `POST /admin/v1/http/circuit-breaker/trip` | `POST` | Manually trips a circuit breaker to OPEN (emergency shedding). |
+| Endpoint | Method | Payload / Params | Response | Description |
+|---|---|---|---|---|
+| `/admin/v1/http/config` | `GET` | None | `200 OK` (JSON) | Returns active configuration snapshot and running profile. |
+| `/admin/v1/http/reload` | `POST` | None | `200 OK` / `400 Bad Request` | Forces immediate disk reread and atomic swap of `http-config.yml`. |
+| `/admin/v1/http/circuit-breaker` | `GET` | `?target=scorer` | `200 OK` (JSON) | Returns circuit state (`CLOSED`/`OPEN`), failure counts, and sliding window metrics. |
+| `/admin/v1/http/circuit-breaker/reset` | `POST` | `{"target": "scorer"}` | `200 OK` (JSON) | Manually forces an `OPEN` circuit breaker back to `CLOSED`. |
+| `/admin/v1/http/circuit-breaker/trip` | `POST` | `{"target": "scorer"}` | `200 OK` (JSON) | Manually trips a circuit breaker to `OPEN` (emergency traffic shedding). |
 
 ---
 
@@ -211,9 +278,9 @@ Each microservice exposes control endpoints on its admin port (`127.0.0.1:9090` 
 All cross-cutting policy audits, anomaly detections, and dead-letter events are published to Kafka following CloudEvents 1.0 JSON specifications.
 
 ### 6.1 Kafka Topic Architecture
-- **`http.outbound.audit.v1`**: Emitted for every high-tier outbound call or policy rejection.
-- **`http.outbound.circuit_breaker.v1`**: Emitted when a circuit breaker transitions states (`CLOSED -> OPEN`, `OPEN -> HALF_OPEN`).
-- **`http.outbound.dlq.v1`**: Unrecoverable network or downstream 5xx errors after retry exhaustion.
+- **`http.outbound.audit.v1`**: Sampled audit stream of outgoing HTTP calls with status, duration, and trace context.
+- **`http.outbound.circuit_breaker.v1`**: Real-time event stream published whenever a circuit breaker transitions state.
+- **`http.outbound.dlq.v1`**: Dead Letter Queue capturing unrecoverable HTTP failures after retry exhaustion for offline replay.
 
 ### 6.2 CloudEvent Schema Example (`http.outbound.circuit_breaker.v1`)
 ```json
@@ -240,132 +307,40 @@ All cross-cutting policy audits, anomaly detections, and dead-letter events are 
 
 ---
 
-## 7. Exhaustive Configuration Parameter Catalog
+## 7. Exhaustive Parameter Reference: Valid vs. Ideal vs. Anti-Patterns
 
-Below is the complete reference of every single parameter configurable in `http-config.yml`:
+This section provides an in-depth parameter analysis: syntax rules, ideal production settings, and dangerous anti-patterns that risk production outages.
 
-```yaml
-schema_version: "1.0.0"
-feature_name: "quality_baseline"
-profile: "api_service" # Options: api_service | temporal_worker | internal_fast
+### 7.1 Parameter Analysis Table
 
-# ==============================================================================
-# SECTION 1: TRANSPORT & CLIENT CONNECTION POOL
-# ==============================================================================
-client:
-  timeout_seconds: 30.0              # Total wall-clock time limit for request execution
-  connect_timeout_seconds: 5.0       # TCP connect & TLS handshake timeout
-  read_timeout_seconds: 15.0         # Maximum interval between incoming response bytes
-  write_timeout_seconds: 5.0         # Maximum interval between outgoing request bytes
-  max_connections: 100               # Hard limit of concurrent open sockets in pool
-  max_keepalive_connections: 20      # Max idle sockets retained for reuse
-  keepalive_expiry_seconds: 30.0     # Time before an idle socket is closed
-  retries: 3                         # Max connection-level transport retry attempts
-  retry_backoff_factor: 0.5          # Exponential backoff multiplier between retries
-  retry_status_codes:                # HTTP status codes that trigger a retry attempt
-    - 429
-    - 502
-    - 503
-    - 504
-  http2: true                        # Enable HTTP/2 multiplexing support
-  verify_ssl: true                   # Enforce TLS certificate authority validation
-  ca_bundle_path: null               # Custom CA cert bundle file path (or null for system CA)
-  follow_redirects: false            # Disallow auto-following redirects to prevent token leakage
-
-# ==============================================================================
-# SECTION 2: PIPELINE EXECUTION & STAGES
-# ==============================================================================
-pipeline:
-  steps:
-    - input_hardening
-    - ssrf_validation
-    - context_isolation
-    - cache_eval
-    - singleflight
-    - circuit_breaker
-    - rate_limit
-    - admission_control
-
-# ==============================================================================
-# SECTION 3: RESILIENCE - CIRCUIT BREAKER
-# ==============================================================================
-circuit_breaker:
-  sliding_window_type: "count_based" # Options: count_based | time_based
-  sliding_window_size: 20            # Call count or time window in seconds
-  minimum_number_of_calls: 10        # Minimum requests required before error rate is evaluated
-  failure_threshold: 5               # Failures required to trip circuit
-  failure_rate_threshold: 0.5        # Failure percentage (50%) required to trip circuit
-  slow_call_rate_threshold: 0.5      # Slow call percentage (50%) required to trip circuit
-  slow_call_duration_seconds: 10.0   # Calls taking longer than this are considered slow
-  recovery_timeout_seconds: 30.0     # Cooldown period before entering HALF-OPEN state
-  half_open_requests: 3              # Trial calls permitted in HALF-OPEN state
-  half_open_successes_to_close: 3    # Required consecutive successes to restore CLOSED state
-
-# ==============================================================================
-# SECTION 4: RESILIENCE - RATE LIMITER & ADMISSION BULKHEAD
-# ==============================================================================
-rate_limit:
-  algorithm: "token_bucket"          # Options: token_bucket | leaky_bucket | gcra
-  requests_per_second: 100           # Refill rate of permitted requests
-  burst: 200                         # Maximum token accumulation ceiling
-  key_strategy: "tenant_id"          # Options: global | tenant_id | principal_id | host
-  on_exceeded: "reject"              # Options: reject (429) | queue
-
-admission_control:
-  concurrency_limit: 50              # Maximum concurrent in-flight requests inside client
-  queue_size: 100                    # Maximum queue depth for pending admissions
-  queue_timeout_seconds: 0.5         # Maximum time a request may wait in queue before rejection
-
-# ==============================================================================
-# SECTION 5: PERFORMANCE - CACHE EVAL & SINGLEFLIGHT
-# ==============================================================================
-cache_eval:
-  enabled: true                      # Activate response caching
-  backend: "in_memory"               # Options: in_memory | redis
-  default_ttl_seconds: 60            # Cache expiration duration
-  ttl_jitter_ratio: 0.1              # Random jitter to prevent cache stampedes
-  stale_if_error_seconds: 300.0      # Serve stale cached payload if upstream throws 5xx
-  max_entries: 10000                 # Maximum stored cache keys
-  methods:
-    - GET
-    - HEAD
-
-singleflight:
-  enabled: true                      # Deduplicate identical concurrent in-flight GET requests
-  key_hash_algorithm: "sha256"       # Key hashing: sha256 of Method + URL + Tenant + Body
-
-# ==============================================================================
-# SECTION 6: SECURITY - INPUT HARDENING & SSRF VALIDATION
-# ==============================================================================
-security:
-  input_hardening:
-    reject_crlf_headers: true        # Prevent HTTP Response Splitting via \r\n injection
-    max_json_depth: 20               # Maximum nested depth of outgoing JSON payloads
-    max_json_keys: 1000              # Maximum keys in outgoing JSON payloads
-    max_string_length: 65536         # Maximum length of single JSON string parameter
-  ssrf_validation:
-    enforce_on: "user_supplied_url"  # Options: all | user_supplied_url | disabled
-    allowed_schemes:
-      - https
-      - http
-    blocked_ip_ranges:
-      - "0.0.0.0/8"                  # Broadcast
-      - "10.0.0.0/8"                 # RFC 1918 Private
-      - "100.64.0.0/10"              # Carrier Grade NAT
-      - "127.0.0.0/8"                # Loopback
-      - "169.254.0.0/16"             # Link Local & Cloud Metadata (AWS/GCP/Azure)
-      - "172.16.0.0/12"              # RFC 1918 Private
-      - "192.168.0.0/16"             # RFC 1918 Private
-      - "fc00::/7"                   # IPv6 Unique Local
-      - "fe80::/10"                  # IPv6 Link Local
-```
+| Parameter Path | Type & Valid Range | Ideal Production Setting | Anti-Pattern (What is NOT Ideal) | Failure Mode Caused by Anti-Pattern |
+|---|---|---|---|---|
+| `profile` | `enum`: `api_service`, `temporal_worker`, `internal_fast` | `api_service` for REST; `temporal_worker` for Temporal activities; `internal_fast` for cluster RPC. | Setting `api_service` inside Temporal worker activities. | Worker thread starvation; duplicate retries clashing with Temporal's retry engine; deadlock on bulkheads. |
+| `client.timeout_seconds` | `float`: `0.1` to `300.0` | `10.0` to `30.0` for web APIs; `60.0` for batch/AI processing. | Setting to `0.0` (infinite timeout) or `> 120.0` for customer-facing APIs. | Thread pool exhaustion; Slowloris vulnerability; upstream gateway times out with HTTP 504 while worker stays hung. |
+| `client.connect_timeout_seconds` | `float`: `0.05` to `30.0` | `2.0` to `5.0` seconds. | Setting to `> 15.0` seconds. | Slow connection attempts block worker threads when a downstream host drops packets. |
+| `client.max_connections` | `int`: `1` to `5000` | `100` to `200` per process replica. | Setting to `> 2000` or leaving unbounded. | Kernel file descriptor exhaustion (`EMFILE: Too many open files`); ephemeral port starvation. |
+| `client.max_keepalive_connections`| `int`: `0` to `max_connections` | `20` to `50` (typically 20–30% of `max_connections`). | Setting to `0` or equal to `max_connections`. | Setting to 0 destroys socket reuse, causing TCP handshake / TLS renegotiation latency spikes on every single request. |
+| `client.keepalive_expiry_seconds` | `float`: `1.0` to `600.0` | `30.0` to `65.0` (must be shorter than upstream LB idle timeout). | Setting to `> 300.0` seconds. | Race condition: Client sends request on an idle socket just as the upstream load balancer closes it, causing `RemoteProtocolError`. |
+| `client.retries` | `int`: `0` to `10` | `2` to `3` for idempotent methods (GET/PUT); `0` for non-idempotent (POST). | Setting to `> 5` with fixed zero backoff. | Retry storms (thundering herd) that overwhelm recovering downstream services. |
+| `client.retry_backoff_factor` | `float`: `0.1` to `5.0` | `0.5` (exponential backoff: 0.5s, 1.0s, 2.0s with full jitter). | Setting to `0.0` (immediate retry). | Immediate re-execution hits the downstream service while it is still saturated, prolonging the outage. |
+| `client.http2` | `bool`: `true`, `false` | `true` for services supporting ALPN HTTP/2. | Leaving `false` for high-throughput internal RPCs. | Forces 1 request per TCP socket, multiplying connection count by 50x under load. |
+| `client.verify_ssl` | `bool`: `true`, `false` | `true` across all staging and production environments. | Setting to `false` in production. | Critical vulnerability: Disables TLS certificate validation, exposing traffic to Man-in-the-Middle (MitM) interception. |
+| `client.follow_redirects` | `bool`: `true`, `false` | `false` (explicit redirection handling). | Setting to `true` on calls transmitting authorization headers. | Credential leakage: HTTP client automatically forwards `Authorization` bearer tokens to third-party redirect locations. |
+| `circuit_breaker.failure_threshold` | `int`: `1` to `50` | `5` consecutive failures. | Setting to `1` or `> 20`. | Setting to 1 causes false positives on transient blips; setting >20 allows hundreds of threads to hang before tripping. |
+| `circuit_breaker.recovery_timeout_seconds` | `float`: `1.0` to `300.0` | `30.0` seconds. | Setting to `< 2.0` seconds. | Floods recovering downstream services before they have finished restarting or clearing backlogs. |
+| `rate_limit.requests_per_second` | `int`: `1` to `50000` | Scaled to match downstream SLA (e.g. `100` req/s). | Setting to `99999` (effectively disabled). | Downstream service is overwhelmed and returns 500/503 errors during traffic spikes. |
+| `rate_limit.burst` | `int`: `>= requests_per_second` | `1.5x` to `2x` of `requests_per_second` (e.g. `200`). | Setting `burst` equal to `requests_per_second * 10`. | Large sudden packet floods overwhelm downstream connection queues. |
+| `admission_control.concurrency_limit` | `int`: `1` to `1000` | `50` to `100` concurrent requests per client instance. | Setting to unbounded (`None`). | Client allocates thousands of concurrent async tasks, exhausting process RAM and CPU cycles. |
+| `cache_eval.stale_if_error_seconds` | `float`: `0.0` to `86400.0` | `300.0` to `600.0` seconds. | Setting to `0.0`. | Downstream outage immediately cascades to end-users instead of serving graceful degraded cached content. |
+| `security.input_hardening.reject_crlf_headers` | `bool`: `true`, `false` | `true` (non-negotiable security invariant). | Setting to `false`. | Allows HTTP response splitting and header injection attacks. |
+| `security.ssrf_validation.blocked_ip_ranges` | `list[str]` (CIDRs) | Must include `0.0.0.0/8`, `10.0.0.0/8`, `127.0.0.0/8`, `169.254.0.0/16`, `172.16.0.0/12`, `192.168.0.0/16`. | Omitting `169.254.0.0/16` or private CIDRs. | Exposes AWS/GCP instance metadata API (`169.254.169.254`), allowing attackers to steal IAM instance credentials. |
 
 ---
 
 ## 8. Complete Operations & Implementation Manual
 
 ### Step 1: Scaffolding Feature Configuration File
-Create the configuration file inside your feature folder:
+Create `http-config.yml` inside your feature folder:
 
 ```bash
 mkdir -p quality-engine/src/features/score_composite
