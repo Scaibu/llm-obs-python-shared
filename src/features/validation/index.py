@@ -35,7 +35,10 @@ from src.features.validation.service.yaml_validation_service import YamlValidati
 from src.features.validation.service.json_validation_service import JsonValidationService
 from src.features.validation.service.toml_validation_service import TomlValidationService
 from src.features.validation.service.validation_service import ValidationService
-from src.api.rest.v1.routers.validation_router import validation_router
+try:
+    from src.api.rest.v1.routers.validation_router import validation_router
+except Exception:
+    validation_router = None
 
 __all__ = [
     "CanonicalKeyDTO",

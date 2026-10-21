@@ -1,13 +1,30 @@
-"""
-python-shared: Centralized infrastructure, telemetry, db, http, discovery, and shared types.
-Modeled after packages/node/shared-infra.
-"""
+import os
+import sys
+
+_shared_src = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_features_dir = os.path.join(_shared_src, "features")
+
+try:
+    import src
+    if hasattr(src, "__path__") and _shared_src not in src.__path__:
+        src.__path__.append(_shared_src)
+    try:
+        import src.features
+        if hasattr(src.features, "__path__") and _features_dir not in src.features.__path__:
+            src.features.__path__.append(_features_dir)
+    except Exception:
+        pass
+except Exception:
+    pass
 
 from python_shared.types import BaseResponse, HealthStatusResponse
 from python_shared.telemetry import setup_telemetry, get_tracer, REQUEST_COUNT, REQUEST_LATENCY
-from src.features.http.client import ResilientHttpClient
-from src.features.http.pipeline.resilience import CircuitBreaker
-from src.features.http.middleware import CorrelationAndTelemetryMiddleware
+from python_shared.http import (
+    ResilientHttpClient,
+    CircuitBreaker,
+    CorrelationAndTelemetryMiddleware,
+)
+
 from python_shared.db import get_redis_client, get_redis_pool, get_postgres_connection
 from python_shared.discovery import (
     resolve_service_endpoint,
