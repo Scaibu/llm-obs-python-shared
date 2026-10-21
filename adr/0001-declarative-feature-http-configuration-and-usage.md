@@ -789,6 +789,87 @@ export FEATURE_DIR="${MONOREPO_ROOT}/${PACKAGE_NAME}/src/features/${FEATURE_NAME
 
 ---
 
+#### 8.0.1 End-to-End Pipeline Step Topology & Dataflow Map
+
+The following architectural map illustrates how artifacts, parameters, and contracts flow through all 8 steps of the implementation framework, and identifies where isolation boundaries allow each step to be executed and tested independently:
+
+```text
++------------------------------------------------------------------------------------------------------------------------+
+|                         END-TO-END IMPLEMENTATION PIPELINE: STEP TOPOLOGY & DATAFLOW MAP                               |
+|                     (How Artifacts Flow from Step 1 to Step 8 & Where Isolation Boundaries Lie)                        |
++------------------------------------------------------------------------------------------------------------------------+
+
+[ENV SETUP]  PACKAGE_NAME, FEATURE_NAME, FEATURE_PROFILE, MONOREPO_ROOT, FEATURE_DIR
+     │
+     ▼
++───────────────────────────────────────────────────────────────────────────────────────────────────+
+| STEP 1: Feature Folder Audit & Hexagonal Scaffolding                                              |
+| INPUT:  Target Directory Path & Sub-layer Specifications                                          |
+| OUTPUT: Hexagonal Tree (contracts/, domain/, infrastructure/, service/, tests/) + PEP 420 markers |
+| STANDALONE USE: Run directory compliance auditor via 'po file-search --root <dir> --tree'         |
++───────────────────────────────────────────────────────────────────────────────────────────────────+
+     │ Creates directory structure for all subsequent layers
+     ▼
++───────────────────────────────────────────────────────────────────────────────────────────────────+
+| STEP 2: Declarative http-config.yml Authoring                                                     |
+| INPUT:  FEATURE_PROFILE ("api_service" | "temporal_worker" | "internal_fast"), Timeouts, Policies    |
+| OUTPUT: Validated http-config.yml containing client settings & active pipeline interceptors       |
+| STANDALONE USE: Lint & validate YAML schema without Python runtime via pyyaml safe_load          |
++───────────────────────────────────────────────────────────────────────────────────────────────────+
+     │ Provides declarative network, retry, and interceptor configuration
+     │
+     ├──────────────────────────────────────────────┐
+     │                                              │
+     ▼                                              ▼
++────────────────────────────────────────+   +──────────────────────────────────────────────────────+
+| STEP 3: Pure Domain Port Definition    |   | STEP 4: Concrete HTTP Adapter Implementation         |
+| INPUT:  Domain Business Method Intent  |──>| INPUT:  http-config.yml (Step 2) + Port (Step 3)     |
+| OUTPUT: FeatureOutboundPort (ABC)      |   | OUTPUT: HttpFeatureOutboundAdapter with Client       |
+| STANDALONE USE: Abstract contract test |   | STANDALONE USE: Direct API invocation in script      |
++────────────────────────────────────────+   +──────────────────────────────────────────────────────+
+     │ Contract definition                          │ Concrete implementation
+     │                                              │
+     └──────────────────────┬───────────────────────┘
+                            │
+                            ▼
++───────────────────────────────────────────────────────────────────────────────────────────────────+
+| STEP 5: Domain Service Dependency Injection                                                       |
+| INPUT:  FeatureOutboundPort interface (injected via constructor) + Domain Payload data            |
+| OUTPUT: FeatureDomainService orchestrating business logic & returning pure domain DTO             |
+| STANDALONE USE: Execute pure business logic with offline In-Memory StubPort (zero network)        |
++───────────────────────────────────────────────────────────────────────────────────────────────────+
+     │
+     ├──────────────────────────────────────────────┬───────────────────────────────────────────────┐
+     │                                              │                                               │
+     ▼                                              ▼                                               ▼
++──────────────────────────────+   +──────────────────────────────+   +─────────────────────────────+
+| STEP 6: Unit Test Isolation  |   | STEP 7: Fault-Injection Test |   | STEP 8: Live Hot-Reload     |
+| INPUT:  Step 5 Service +     |   | INPUT:  Step 4 Adapter +     |   | INPUT:  Updated Step 2 YAML |
+|         AsyncMock Port       |   |         httpx.MockTransport  |   |         + Running Process   |
+| OUTPUT: Instant (<50ms) CI   |   | OUTPUT: Verified Circuit     |   | OUTPUT: Zero-downtime atomic|
+|         test assertions      |   |         Breaker & Headers    |   |         in-memory swap      |
+| STANDALONE USE:              |   | STANDALONE USE:              |   | STANDALONE USE:             |
+| Run 'pytest tests/' offline  |   | Chaos simulation script      |   | SIGHUP config watcher test  |
++──────────────────────────────+   +──────────────────────────────+   +─────────────────────────────+
+```
+
+---
+
+#### 8.0.2 Step Input/Output & Interconnection Master Matrix
+
+| Step | Component Name | Exact Inputs Given | Exact Outputs Produced | Direct Upstream Source | Direct Downstream Consumer | How to Use Individually (Standalone Mode) |
+|---|---|---|---|---|---|---|
+| **Step 1** | **Hexagonal Scaffolding** | `PACKAGE_NAME`, `FEATURE_NAME`, `FEATURE_DIR`, Monorepo Root | 6 subdirectories (`contracts/`, `domain/`, `infrastructure/`, `service/`, `tests/`) + PEP 420 `__init__.py` markers | Monorepo filesystem | Steps 2, 3, 4, 5, 6 | Run directory linter: `po file-search --root $FEATURE_DIR --tree` |
+| **Step 2** | **Declarative Config** | `FEATURE_PROFILE`, client timeouts, connection caps, retry counts, CB thresholds | Validated `${FEATURE_DIR}/http-config.yml` | Step 1 (directory) | Step 4 (Adapter client), Step 7 (fault test), Step 8 (reload) | Validate schema without code: `python3 -c "import yaml; yaml.safe_load(open('$FEATURE_DIR/http-config.yml'))"` |
+| **Step 3** | **Domain Port** | Method signatures, domain entity types (`payload: Dict`, `tenant_id: str`) | Abstract Base Class `FeatureOutboundPort(ABC)` with abstract methods | Step 1 (`infrastructure/ports/`) | Step 4 (Adapter implements it), Step 5 (Service accepts it) | Abstract contract verification: AST AST parser verifying 0 network imports |
+| **Step 4** | **HTTP Adapter** | Target `base_url`, `http-config.yml` (Step 2), `FeatureOutboundPort` (Step 3) | Concrete `HttpFeatureOutboundAdapter` class wrapping `ResilientHttpClient` | Step 2 (`http-config.yml`), Step 3 (Port contract) | Step 5 (Domain Service dependency injection) | Standalone script invoking remote endpoint directly without domain logic |
+| **Step 5** | **Domain Service** | Injected Port instance (Step 3/4), caller data (`data: Dict`, `tenant_id: str`) | Orchestrated domain result (`{"status": "COMPLETED", "result": raw}`) | Step 3 (Port contract), Step 4 (runtime adapter) | REST router / Temporal worker / CLI caller | Run business logic offline using an in-memory `StubPort` (no network needed) |
+| **Step 6** | **Unit Testing** | `FeatureDomainService` (Step 5), `unittest.mock.AsyncMock` port fixtures | Pytest assertions, test report (`pytest -v`), code coverage metrics | Step 3 (Port interface), Step 5 (Domain Service) | CI/CD build gate | Run `pytest <feature_dir>/tests/ -v` (executes in <50ms completely in-memory) |
+| **Step 7** | **Fault Injection** | `ResilientHttpClient` (Step 4), `httpx.MockTransport` error responses (503s) | Verified Circuit Breaker state changes (`CLOSED` -> `OPEN`), W3C trace validation | Step 2 (policies), Step 4 (resilient client) | SRE runbooks & resilience verification | Run chaos simulation script to test failure scenarios locally without live servers |
+| **Step 8** | **Live Hot-Reload** | Modified `http-config.yml` (Step 2), SIGHUP or `from_config()` invocation | Atomic swap of immutable config snapshot; zero request drops | Step 2 (`http-config.yml`), Step 4 (running client) | Production operations, live maintenance | Modify timeout via `sed` and verify reload via `from_config()` without process restart |
+
+---
+
 ### Step 1: Feature Folder Audit & Hexagonal Scaffolding (Rule 1 Compliance)
 
 #### 1.1 Purpose & Architectural Rationale
@@ -861,6 +942,32 @@ print(f'>>> Step 1 SUCCESS: Hexagonal structure verified for {feature_dir}')
 - **Error: `ModuleNotFoundError: No module named 'src.features.<feature>'`**:
   - *Cause*: A developer created `src/__init__.py` or `src/features/__init__.py`, breaking Python's native namespace package resolution.
   - *Fix*: Run `rm -f ${PACKAGE_NAME}/src/__init__.py ${PACKAGE_NAME}/src/features/__init__.py`.
+
+#### 1.6 Input/Output, Interconnection & Standalone Usage Reference
+
+- **Inputs Given**:
+  - `PACKAGE_NAME`: Name of the target microservice package (e.g. `quality-engine`, `alert-engine`).
+  - `FEATURE_NAME`: Target feature folder name (e.g. `score_composite`, `embedding_worker`).
+  - `MONOREPO_ROOT`: Base absolute path of the monorepo workspace.
+  - `FEATURE_DIR`: Target path computed as `${MONOREPO_ROOT}/${PACKAGE_NAME}/src/features/${FEATURE_NAME}`.
+- **Outputs Produced**:
+  - Six clean subdirectories: `contracts/`, `domain/`, `infrastructure/ports/`, `infrastructure/adapters/`, `service/`, `tests/`.
+  - Seven standard `__init__.py` subpackage files.
+  - Strict assertion that `src/__init__.py` and `src/features/__init__.py` are deleted (PEP 420 namespace compliance).
+  - Exit code: 0 on successful structure validation.
+- **How It Connects to Other Steps**:
+  - Upstream: Depends on the existence of the monorepo package root directory.
+  - Downstream: Provides the essential directory structure for all remaining steps:
+    - Step 2 writes `${FEATURE_DIR}/http-config.yml`.
+    - Step 3 creates the abstract port in `${FEATURE_DIR}/infrastructure/ports/`.
+    - Step 4 creates the concrete adapter in `${FEATURE_DIR}/infrastructure/adapters/`.
+    - Step 5 places the domain service in `${FEATURE_DIR}/service/`.
+    - Step 6 places unit tests in `${FEATURE_DIR}/tests/`.
+- **How to Use Individually (Standalone Mode)**:
+  - Can be run as a standalone scaffolding command or CI folder compliance checker for any new feature before writing any code:
+    ```bash
+    po file-search --root "${PACKAGE_NAME}/src/features/${FEATURE_NAME}" --tree
+    ```
 
 ---
 
@@ -1188,6 +1295,29 @@ print(f'>>> Step 2 SUCCESS: http-config.yml validated for profile [{profile}]')
 "
 ```
 
+#### 2.6 Input/Output, Interconnection & Standalone Usage Reference
+
+- **Inputs Given**:
+  - `FEATURE_NAME`: Target feature identifier.
+  - `FEATURE_PROFILE`: One of `api_service`, `temporal_worker`, or `internal_fast`.
+  - Network requirements: Client timeouts, keepalive pool sizes, retry counts, circuit breaker failure threshold, rate limiting quota.
+- **Outputs Produced**:
+  - Validated declarative YAML file: `${FEATURE_DIR}/http-config.yml`.
+  - 23 calibrated parameters across `client`, `pipeline.steps`, `circuit_breaker`, `rate_limit`, `cache_eval`, and `security`.
+- **How It Connects to Other Steps**:
+  - Upstream: Written into `${FEATURE_DIR}` created in Step 1.
+  - Downstream: Read directly by Step 4's `ResilientHttpClient.from_config()`. The adapter uses this YAML to configure all timeouts, connection pools, and interceptors. Also verified under fault conditions in Step 7 and dynamically hot-reloaded in Step 8.
+- **How to Use Individually (Standalone Mode)**:
+  - Can be written, validated, linted, or tuned completely standalone without running any application code or having microservices started:
+    ```bash
+    python3 -c "
+    import yaml
+    with open('${FEATURE_DIR}/http-config.yml') as f:
+        cfg = yaml.safe_load(f)
+    print('Config validated! Profile:', cfg['profile'], '| Steps:', cfg['pipeline']['steps'])
+    "
+    ```
+
 ---
 
 ### Step 3: Defining the Pure Domain Outbound Port Interface (`infrastructure/ports/`)
@@ -1244,6 +1374,37 @@ for node in ast.walk(tree):
 print(f'>>> Step 3 SUCCESS: Port interface verified pure of networking imports')
 "
 ```
+
+#### 3.4 Input/Output, Interconnection & Standalone Usage Reference
+
+- **Inputs Given**:
+  - Domain business contract requirements: method names, parameter types (`payload: Dict[str, Any]`, `tenant_id: str`, `correlation_id: Optional[str]`).
+  - Zero networking concepts: No URLs, no HTTP methods (GET/POST), no headers, no status codes.
+- **Outputs Produced**:
+  - Python interface module: `${FEATURE_DIR}/infrastructure/ports/${FEATURE_NAME}_port.py`.
+  - Abstract Base Class: `class FeatureOutboundPort(ABC)` with abstract method `execute_remote_operation()`.
+- **How It Connects to Other Steps**:
+  - Upstream: Placed in `${FEATURE_DIR}/infrastructure/ports/` created in Step 1.
+  - Downstream:
+    - Implemented by Step 4's concrete `HttpFeatureOutboundAdapter`.
+    - Required as constructor dependency injection in Step 5's `FeatureDomainService(__init__(self, outbound_port))`.
+    - Mocked in Step 6's unit tests using `AsyncMock`.
+- **How to Use Individually (Standalone Mode)**:
+  - Can be defined and verified completely independently of HTTP clients, libraries, or network infrastructure.
+  - Allows multiple interchangeable implementations: an HTTP adapter, a gRPC adapter, a Kafka event adapter, or an in-memory stub can all implement this same port without modifying domain code.
+  - Standalone verification command (AST parser asserting zero networking imports):
+    ```bash
+    python3 -c "
+    import ast
+    with open('${FEATURE_DIR}/infrastructure/ports/${FEATURE_NAME}_port.py') as f:
+        tree = ast.parse(f.read())
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            mod = getattr(node, 'module', '') or [a.name for a in node.names][0]
+            assert mod not in {'httpx', 'requests', 'urllib', 'aiohttp'}, f'Forbidden import {mod}'
+    print('Port is 100% pure domain!')
+    "
+    ```
 
 ---
 
@@ -1322,6 +1483,42 @@ print(f'>>> Step 4 SUCCESS: Adapter successfully bound to {client.profile} with 
 "
 ```
 
+#### 4.4 Input/Output, Interconnection & Standalone Usage Reference
+
+- **Inputs Given**:
+  - `http-config.yml` from Step 2 (loaded via `Path(__file__).resolve().parents[2]`).
+  - `FeatureOutboundPort` contract from Step 3.
+  - Remote target `base_url` (e.g. `"http://localhost:8000"` or cluster service DNS).
+  - Inbound method call: `execute_remote_operation(payload, tenant_id, correlation_id)`.
+- **Outputs Produced**:
+  - Concrete adapter class: `class HttpFeatureOutboundAdapter(FeatureOutboundPort)`.
+  - Instantiated `ResilientHttpClient` configured with active pipeline interceptors.
+  - Method execution output: Domain result dictionary mapped from HTTP JSON response (`response.json()`).
+- **How It Connects to Other Steps**:
+  - Upstream: Implements the Port from Step 3; loads configuration from Step 2; placed in directory from Step 1.
+  - Downstream: Injected into Step 5's `FeatureDomainService`; tested against simulated network failures in Step 7; hot-reloads config in Step 8.
+- **How to Use Individually (Standalone Mode)**:
+  - Can be instantiated and invoked directly in a standalone script, CLI tool, or integration smoke test without needing the domain service or Web API layer:
+    ```python
+    import asyncio
+    from pathlib import Path
+    import sys
+
+    # Add python-shared to path
+    sys.path.insert(0, "python-shared")
+    from src.features.score_composite.infrastructure.adapters.http_score_composite_adapter import HttpFeatureOutboundAdapter
+
+    async def main():
+        adapter = HttpFeatureOutboundAdapter(base_url="http://localhost:8000")
+        result = await adapter.execute_remote_operation(
+            payload={"test_key": "test_val"},
+            tenant_id="tenant-standalone"
+        )
+        print("Adapter executed independently:", result)
+
+    asyncio.run(main())
+    ```
+
 ---
 
 ### Step 5: Injecting the Port into the Pure Domain Service (`service/`)
@@ -1396,6 +1593,39 @@ print('>>> Step 5 SUCCESS: Domain service dependency injection verified')
 "
 ```
 
+#### 5.4 Input/Output, Interconnection & Standalone Usage Reference
+
+- **Inputs Given**:
+  - Injected Port instance conforming to `FeatureOutboundPort` (from Step 3/4).
+  - Business execution parameters: `data: Dict[str, Any]`, `tenant_id: str`, `correlation_id: Optional[str]`.
+- **Outputs Produced**:
+  - Domain service class: `class FeatureDomainService`.
+  - Business domain result dictionary (e.g. `{"status": "COMPLETED", "result": raw_result}`).
+  - Domain exceptions on validation failure (`ValueError("Input data cannot be empty")`).
+- **How It Connects to Other Steps**:
+  - Upstream: Consumes the Port interface defined in Step 3. In production, it receives Step 4's `HttpFeatureOutboundAdapter`. In unit tests, it receives Step 6's mock.
+  - Downstream: Exposed directly to user-facing controllers, FastAPI routers, Temporal workflow activities, or CLI commands.
+- **How to Use Individually (Standalone Mode)**:
+  - Can be executed, debugged, and unit-tested 100% offline with zero network connectivity using an in-memory stub port:
+    ```python
+    import asyncio
+    from src.features.score_composite.service.score_composite_service import FeatureDomainService
+
+    class InMemoryStubPort:
+        async def execute_remote_operation(self, payload, tenant_id, correlation_id=None):
+            return {"mock_score": 0.98, "status": "calculated_in_memory"}
+
+    async def run_offline():
+        service = FeatureDomainService(outbound_port=InMemoryStubPort())
+        res = await service.execute_business_action(
+            data={"metric_values": [1.0, 0.9, 0.95]},
+            tenant_id="tenant-local"
+        )
+        print("Pure domain logic output:", res)
+
+    asyncio.run(run_offline())
+    ```
+
 ---
 
 ### Step 6: Unit Testing with In-Memory Mocks (`tests/`)
@@ -1464,6 +1694,24 @@ Run the unit tests using `pytest`:
 ```bash
 pytest "${FEATURE_DIR}/tests/${FEATURE_NAME}_service_test.py" -v
 ```
+
+#### 6.4 Input/Output, Interconnection & Standalone Usage Reference
+
+- **Inputs Given**:
+  - `FeatureDomainService` instance from Step 5.
+  - `unittest.mock.AsyncMock` configured to simulate `FeatureOutboundPort` returns and exceptions.
+  - Test test-cases: Valid data payload, empty payload validation error, mock downstream responses.
+- **Outputs Produced**:
+  - Automated test execution report (`pytest -v`).
+  - Pass/Fail verification of business constraints and port call assertions (`mock_port.execute_remote_operation.assert_awaited_once_with(...)`).
+- **How It Connects to Other Steps**:
+  - Upstream: Tests the domain service implemented in Step 5 while mocking the port defined in Step 3.
+  - Downstream: Acts as an ultra-fast local developer test loop and CI/CD quality gate before running slower integration or fault-injection tests in Step 7.
+- **How to Use Individually (Standalone Mode)**:
+  - Can be run completely offline in milliseconds from the command line on any workstation or CI runner without external services:
+    ```bash
+    pytest "${FEATURE_DIR}/tests/${FEATURE_NAME}_service_test.py" -v
+    ```
 
 ---
 
@@ -1538,6 +1786,41 @@ print('>>> Step 7 SUCCESS: Pipeline resilience and fault-injection verified!')
 "
 ```
 
+#### 7.3 Input/Output, Interconnection & Standalone Usage Reference
+
+- **Inputs Given**:
+  - `ResilientHttpClient` configured with `api_service` profile from Step 2 and Step 4.
+  - Simulated fault scenarios: `httpx.MockTransport` programmed to return 503 Service Unavailable, simulated connection drops, and header inspection handlers.
+- **Outputs Produced**:
+  - Verified W3C `traceparent` and `x-tenant-id` header transmission.
+  - Verified Circuit Breaker state transition: 5 consecutive failures trips state from `CLOSED` to `OPEN`.
+  - Fast-fail assertion: Subsequent calls fail immediately without dispatching network frames.
+  - Emitted metrics: `circuit_breaker.transition.open`.
+- **How It Connects to Other Steps**:
+  - Upstream: Validates the resilience policies defined in Step 2 and implemented in Step 4.
+  - Downstream: Confirms that when Step 5's Domain Service invokes remote actions during an outage, connection pools and resources are protected from exhaustion.
+- **How to Use Individually (Standalone Mode)**:
+  - Can be run as a standalone chaos engineering test or reliability harness on a developer workstation without live external dependencies:
+    ```bash
+    python3 -c "
+    import asyncio, httpx
+    from python_shared.http import ResilientHttpClient
+
+    async def run_chaos():
+        client = ResilientHttpClient(base_url='http://mock-target', profile='api_service')
+        client._async_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda req: httpx.Response(503, json={'err': 'downstream_down'})),
+            base_url='http://mock-target'
+        )
+        for i in range(5):
+            try: await client.execute_async('GET', '/test', tenant_id='t-1')
+            except Exception: pass
+        print('Circuit breaker tripped successfully in standalone test!')
+
+    asyncio.run(run_chaos())
+    "
+    ```
+
 ---
 
 ### Step 8: Operational Hot-Reload, SIGHUP Triggers & Production Verification
@@ -1574,6 +1857,28 @@ print('>>> Step 8 SUCCESS: Dynamic configuration reload verified without process
 sed -i "s/timeout_seconds: .*/timeout_seconds: ${CURRENT_TIMEOUT}/" "${FEATURE_DIR}/http-config.yml"
 ```
 
+#### 8.3 Input/Output, Interconnection & Standalone Usage Reference
+
+- **Inputs Given**:
+  - Live running process or dynamic loader instance.
+  - Modified `${FEATURE_DIR}/http-config.yml` on disk (e.g. timeout adjusted via SRE tool, GitOps sync, or ConfigMap reload).
+  - Reload trigger: SIGHUP signal, filesystem watcher event, or `ResilientHttpClient.from_config()` call.
+- **Outputs Produced**:
+  - Atomic pointer swap to new immutable configuration snapshot.
+  - Updated client runtime properties (`client.timeout == 45.0`) with zero dropped in-flight requests, zero TCP socket churn, and zero process downtime.
+  - Reload log: `Config reloaded successfully`.
+- **How It Connects to Other Steps**:
+  - Upstream: Modifies the file created in Step 2; refreshes the client instantiated in Step 4 and used by Step 5.
+  - Downstream: Enables live operational tuning by SREs and production runbooks without triggering Kubernetes Pod restarts.
+- **How to Use Individually (Standalone Mode)**:
+  - Can be tested standalone to verify dynamic configuration reloading mechanics without starting the web server:
+    ```bash
+    python3 -c "
+    from python_shared.http import ResilientHttpClient
+    client = ResilientHttpClient.from_config('${FEATURE_DIR}')
+    print('Current timeout loaded dynamically:', client.timeout)
+    "
+    ```
 
 ---
 
